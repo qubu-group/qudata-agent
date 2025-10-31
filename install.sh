@@ -41,6 +41,9 @@ ubuntu-drivers autoinstall 2>/dev/null || true
 apt-get install -y -qq nvidia-utils-535 libnvidia-ml-dev 2>/dev/null || apt-get install -y -qq libnvidia-ml-dev
 
 echo "==> Installing Docker"
+if [ -f "/usr/share/keyrings/docker-archive-keyring.gpg" ]; then
+  rm /usr/share/keyrings/docker-archive-keyring.gpg
+fi
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
 apt-get update -qq

@@ -3,6 +3,7 @@ package internal
 import (
 	"bufio"
 	"github.com/google/uuid"
+	"github.com/magicaleks/qudata-agent-alpha/pkg/utils"
 	"os"
 	"strings"
 )
@@ -23,7 +24,10 @@ func GetAgentId() string {
 		agentIdUUID := uuid.New()
 		agentId = agentIdUUID.String()
 		store, _ := agentIdUUID.MarshalBinary()
-		_ = os.WriteFile(AgentIdPATH, store, 0666)
+		err = os.WriteFile(AgentIdPATH, store, 0666)
+		if err != nil {
+			utils.LogError(err.Error())
+		}
 	}
 	return agentId
 }
@@ -45,5 +49,8 @@ func GetSecretKey() string {
 
 // SetSecretKey sets agent secret key
 func SetSecretKey(secret string) {
-	_ = os.WriteFile(AgentSecretPATH, []byte(secret), 0666)
+	err := os.WriteFile(AgentSecretPATH, []byte(secret), 0666)
+	if err != nil {
+		utils.LogError(err.Error())
+	}
 }
