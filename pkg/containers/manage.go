@@ -1,6 +1,7 @@
 package containers
 
 import (
+	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -106,7 +107,7 @@ func StartInstance(data CreateInstance) error {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		security.DeleteVolume()
-		return errors.InstanceStartError{Err: err}
+		return errors.InstanceStartError{Err: fmt.Errorf("%v: %s", err, string(output))}
 	}
 
 	currentContainerID = strings.TrimSpace(string(output))

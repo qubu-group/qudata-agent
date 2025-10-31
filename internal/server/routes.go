@@ -26,7 +26,7 @@ type createInstanceRequest struct {
 	Login      string            `json:"login"`
 	Password   string            `json:"password"`
 	EnvVars    map[string]string `json:"env_variables"`
-	Ports      map[string]string `json:"ports"`
+	Ports      []string          `json:"ports"`
 	Command    string            `json:"command"`
 	SSHEnabled bool              `json:"ssh_enabled"`
 }
@@ -125,7 +125,7 @@ func instancesHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 			portIdx := 0
-			for containerPort := range req.Ports {
+			for _, containerPort := range req.Ports {
 				hostPort := strconv.Itoa(firstPort + portIdx)
 				allocatedPorts[containerPort] = hostPort
 				portIdx++
