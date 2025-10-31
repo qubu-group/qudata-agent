@@ -144,11 +144,12 @@ func instancesHandler(w http.ResponseWriter, r *http.Request) {
 			SSHEnabled: req.SSHEnabled,
 		}
 
-		if err := containers.StartInstance(createData); err != nil {
-			utils.LogError("failed to start instance: %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		go func() {
+			if err := containers.StartInstance(createData); err != nil {
+				utils.LogError("failed to start instance: %v", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+		}()
 
 		utils.LogInfo("instance created: %s", image)
 		resp, _ := json.Marshal(response{Ok: true, Data: instanceCreatedResponse{Ports: allocatedPorts}})

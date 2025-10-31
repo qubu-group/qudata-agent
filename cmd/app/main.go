@@ -3,10 +3,14 @@ package main
 import (
 	"github.com/magicaleks/qudata-agent-alpha/internal"
 	"github.com/magicaleks/qudata-agent-alpha/internal/server"
+	"github.com/magicaleks/qudata-agent-alpha/pkg/containers"
+	"github.com/magicaleks/qudata-agent-alpha/pkg/security"
 	"github.com/magicaleks/qudata-agent-alpha/pkg/utils"
 )
 
 func main() {
+	cleanupOrphanedResources()
+
 	runtime := internal.NewRuntime()
 	if !runtime.Client.Ping() {
 		panic("qudata service is unavailable")
@@ -14,9 +18,15 @@ func main() {
 
 	initAgent(runtime)
 	go internal.StatsMonitoring(runtime)
-	// TODO: run subprocess security monitoring
 	s := server.NewServer(runtime)
 	s.Run()
+}
+
+func cleanupOrphanedResources() {
+	if !containers.InstanceIsRunning() && security.IsActive() {
+		utils.LogInfo("cleaning up orphaned LUKS volume")
+		security.DeleteVolume()
+	}
 }
 
 func initAgent(runtime *internal.Runtime) {

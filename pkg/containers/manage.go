@@ -41,6 +41,10 @@ func StartInstance(data CreateInstance) error {
 		return errors.InstanceAlreadyRunningError{}
 	}
 
+	if security.IsActive() {
+		security.DeleteVolume()
+	}
+
 	mountPoint := "/var/lib/qudata/secure"
 	sizeMB := int64(10240)
 	if data.VolumeSize != "" {
@@ -113,10 +117,6 @@ func StartInstance(data CreateInstance) error {
 	}
 
 	return nil
-}
-
-func GetAllocatedPorts() map[string]string {
-	return allocatedPorts
 }
 
 func ManageInstance(cmd InstanceCommand) error {

@@ -61,11 +61,6 @@ func CreateVolume(config VolumeConfig) string {
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
 
-	if mgr.active {
-		utils.LogWarn("LUKS: volume already active")
-		return ""
-	}
-
 	if config.MountPoint == "" {
 		utils.LogError("LUKS: mount point not specified")
 		return ""
