@@ -3,7 +3,6 @@ package containers
 import (
 	"fmt"
 	"os/exec"
-	"strconv"
 	"strings"
 
 	"github.com/magicaleks/qudata-agent-alpha/pkg/errors"
@@ -19,7 +18,7 @@ type CreateInstance struct {
 	Image      string
 	CPUs       string
 	Memory     string
-	VolumeSize string
+	VolumeSize int64
 	Registry   string
 	Login      string
 	Password   string
@@ -47,16 +46,10 @@ func StartInstance(data CreateInstance) error {
 	}
 
 	mountPoint := "/var/lib/qudata/secure"
-	sizeMB := int64(10240)
-	if data.VolumeSize != "" {
-		if s, err := strconv.ParseInt(data.VolumeSize, 10, 64); err == nil {
-			sizeMB = s
-		}
-	}
 
 	key := security.CreateVolume(security.VolumeConfig{
 		MountPoint: mountPoint,
-		SizeMB:     sizeMB,
+		SizeMB:     data.VolumeSize,
 	})
 	if key == "" {
 		return errors.LUKSVolumeCreateError{}

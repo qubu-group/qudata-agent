@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -135,9 +136,13 @@ func instancesHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		conf := utils.GetConfiguration()
+
+		utils.LogInfo(image)
+
 		createData := containers.CreateInstance{
 			Image:      image,
-			VolumeSize: strconv.Itoa(req.StorageGB * 1024),
+			VolumeSize: int64(math.Min(float64(req.StorageGB*1024), conf.Disk.Amount*1024)),
 			Registry:   req.Registry,
 			Login:      req.Login,
 			Password:   req.Password,
