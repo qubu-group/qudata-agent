@@ -93,8 +93,12 @@ chmod +x $BIN_DIR/qudata-security
 
 echo "==> Setup environment variables"
 
-export QUDATA_API_KEY=$QUDATA_API_KEY
-export CGO_ENABLED=1
+cat > /etc/qudata.env <<EOF
+QUDATA_API_KEY=$QUDATA_API_KEY
+CGO_ENABLED=1
+EOF
+
+chmod 600 /etc/qudata.env
 
 echo "==> Installing systemd services"
 cat > /etc/systemd/system/qudata-agent.service <<EOF
