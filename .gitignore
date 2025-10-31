@@ -1,0 +1,9 @@
+bin/
+*.log
+.env
+qudata-agent
+qudata-security
+*.o
+*.a
+*.so
+
