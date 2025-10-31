@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/magicaleks/qudata-agent-alpha/pkg/containers"
 	"github.com/magicaleks/qudata-agent-alpha/pkg/utils"
@@ -111,7 +112,9 @@ func instancesHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		image := req.Image
-		if req.ImageTag != "" {
+		if image == "" {
+			image = "ubuntu:22.04"
+		} else if req.ImageTag != "" && !strings.Contains(image, ":") {
 			image += ":" + req.ImageTag
 		}
 

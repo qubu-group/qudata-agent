@@ -79,6 +79,12 @@ func StartInstance(data CreateInstance) error {
 
 	args := []string{"run", "-d", "--runtime=kata-runtime"}
 
+	args = append(args, "--device=/dev/nvidia0")
+	args = append(args, "--device=/dev/nvidiactl")
+	args = append(args, "--device=/dev/nvidia-uvm")
+	args = append(args, "--device=/dev/nvidia-modeset")
+	args = append(args, "--device=/dev/nvidia-uvm-tools")
+
 	if data.CPUs != "" {
 		args = append(args, "--cpus="+data.CPUs)
 	}
