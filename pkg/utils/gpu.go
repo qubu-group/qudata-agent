@@ -4,6 +4,7 @@ package utils
 
 /*
 #cgo LDFLAGS: -lnvidia-ml
+
 int get_gpu_count();
 int get_gpu_name(char *name, unsigned int length);
 double get_gpu_vram();

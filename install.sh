@@ -37,8 +37,8 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     apt-transport-https
 
 echo "==> Installing NVIDIA drivers"
-ubuntu-drivers autoinstall
-apt-get install -y -qq nvidia-utils-535 libnvidia-ml-dev
+ubuntu-drivers autoinstall 2>/dev/null || true
+apt-get install -y -qq nvidia-utils-535 libnvidia-ml-dev 2>/dev/null || apt-get install -y -qq libnvidia-ml-dev
 
 echo "==> Installing Docker"
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
@@ -95,9 +95,6 @@ echo "==> Setup environment variables"
 
 export QUDATA_API_KEY=$QUDATA_API_KEY
 export CGO_ENABLED=1
-
-
-chmod 600 /etc/qudata.env
 
 echo "==> Installing systemd services"
 cat > /etc/systemd/system/qudata-agent.service <<EOF

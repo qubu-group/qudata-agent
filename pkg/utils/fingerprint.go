@@ -2,18 +2,19 @@
 
 package utils
 
+/*
+#cgo LDFLAGS: -lnvidia-ml
+
+const char* getGpuName();
+*/
+import "C"
+
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"strings"
 )
-
-/*
-#cgo LDFLAGS: -lnvidia-ml
-const char* getGpuName();
-*/
-import "C"
 
 // GetFingerprint returns unique fingerprint
 func GetFingerprint() string {

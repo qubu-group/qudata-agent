@@ -12,13 +12,9 @@ int luks_open_volume(const char *device_path, const char *mapper_name,
 int luks_close_volume(const char *mount_point, const char *mapper_name);
 int luks_is_open(const char *mapper_name);
 
-static void secure_zero(void *ptr, size_t len) {
-#ifdef __GLIBC__
-    explicit_bzero(ptr, len);
-#else
+static inline void secure_zero(void *ptr, size_t len) {
     volatile unsigned char *p = ptr;
     while (len--) *p++ = 0;
-#endif
 }
 */
 import "C"

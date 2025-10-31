@@ -1,6 +1,6 @@
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
@@ -8,12 +8,8 @@
 #include <fcntl.h>
 
 static void secure_zero(void *ptr, size_t len) {
-#ifdef __GLIBC__
-    explicit_bzero(ptr, len);
-#else
     volatile unsigned char *p = ptr;
     while (len--) *p++ = 0;
-#endif
 }
 
 static int execute_command(char *const argv[]) {
