@@ -36,10 +36,6 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     ca-certificates \
     apt-transport-https
 
-echo "==> Installing NVIDIA drivers"
-ubuntu-drivers autoinstall 2>/dev/null || true
-apt-get install -y -qq nvidia-utils-535 libnvidia-ml-dev 2>/dev/null || apt-get install -y -qq libnvidia-ml-dev
-
 echo "==> Installing Docker"
 if [ -f "/usr/share/keyrings/docker-archive-keyring.gpg" ]; then
   rm /usr/share/keyrings/docker-archive-keyring.gpg
@@ -69,6 +65,24 @@ cat > /etc/docker/daemon.json <<EOF
 }
 EOF
 
+systemctl restart docker
+
+echo "==> Installing NVIDIA drivers"
+ubuntu-drivers autoinstall 2>/dev/null || true
+apt-get install -y -qq nvidia-utils-535 libnvidia-ml-dev 2>/dev/null || apt-get install -y -qq libnvidia-ml-dev
+
+echo "==> Installing NVIDIA Container Toolkit"
+distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+if [ -f "/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg" ]; then
+  rm /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+fi
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | \
+    sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+    tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+apt-get update -qq
+apt-get install -y -qq nvidia-container-toolkit
+nvidia-ctk runtime configure --runtime=docker
 systemctl restart docker
 
 echo "==> Installing Go"
