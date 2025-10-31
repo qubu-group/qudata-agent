@@ -72,11 +72,15 @@ ubuntu-drivers autoinstall 2>/dev/null || true
 apt-get install -y -qq nvidia-utils-535 libnvidia-ml-dev 2>/dev/null || apt-get install -y -qq libnvidia-ml-dev
 
 echo "==> Installing NVIDIA Container Toolkit"
+if [ -f "/etc/apt/sources.list.d/nvidia-container-toolkit.list" ]; then
+  rm /etc/apt/sources.list.d/nvidia-container-toolkit.list
+fi
 if [ -f "/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg" ]; then
   rm /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 fi
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://nvidia.github.io/libnvidia-container/stable/deb/\$(ARCH) /" | \
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+    sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
     tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
 apt-get update -qq
 apt-get install -y -qq nvidia-container-toolkit
