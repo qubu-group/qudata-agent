@@ -43,6 +43,17 @@ func initAgent(runtime *internal.Runtime) {
 			VRAM:          utils.GetVRAM(),
 			Configuration: utils.GetConfiguration(),
 		}
+		// TODO: rm while prod
+		if hostRequest.GPUName == "" {
+			hostRequest.GPUName = "H100"
+		}
+		if hostRequest.GPUAmount == 0 {
+			hostRequest.GPUAmount = 1
+		}
+		if hostRequest.VRAM == 0 {
+			hostRequest.VRAM = 80
+		}
+		// TODO: rm while prod
 		runtime.Client.CreateHost(hostRequest)
 	}
 }
