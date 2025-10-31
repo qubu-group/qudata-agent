@@ -23,7 +23,6 @@ func GetAgentId() string {
 		agentIdUUID := uuid.New()
 		agentId = agentIdUUID.String()
 		store, _ := agentIdUUID.MarshalBinary()
-		_ = os.MkdirAll(AgentIdPATH, 0777)
 		_ = os.WriteFile(AgentIdPATH, store, 0666)
 	}
 	return agentId
@@ -46,6 +45,5 @@ func GetSecretKey() string {
 
 // SetSecretKey sets agent secret key
 func SetSecretKey(secret string) {
-	_ = os.MkdirAll(AgentIdPATH, 0777)
 	_ = os.WriteFile(AgentSecretPATH, []byte(secret), 0666)
 }

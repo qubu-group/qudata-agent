@@ -11,6 +11,11 @@ const (
 	AgentSecretPATH = "/run/lib/gpu-agent/agent_secret"
 )
 
+var (
+	_ = os.MkdirAll("/var/lib/gpu-agent", 0777)
+	_ = os.MkdirAll("/run/lib/gpu-agent", 0777)
+)
+
 type Runtime struct {
 	Status         containers.InstanceStatus
 	InstanceExists bool
