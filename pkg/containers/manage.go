@@ -70,7 +70,7 @@ func StartInstance(data CreateInstance) error {
 		image = data.Registry + "/" + image
 	}
 
-	args := []string{"run", "-d", "--runtime=kata-runtime", "--gpus=all"}
+	args := []string{"run", "-d", "--runtime=kata", "--gpus=all"}
 
 	if data.CPUs != "" {
 		args = append(args, "--cpus="+data.CPUs)

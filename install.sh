@@ -53,15 +53,20 @@ KATA_VERSION="3.2.0"
 curl -fsSL https://github.com/kata-containers/kata-containers/releases/download/${KATA_VERSION}/kata-static-${KATA_VERSION}-amd64.tar.xz -o /tmp/kata.tar.xz
 tar -xJf /tmp/kata.tar.xz -C /
 rm /tmp/kata.tar.xz
+ln -sf /opt/kata/bin/containerd-shim-kata-v2 /usr/local/bin/containerd-shim-kata-v2
+ln -sf /opt/kata/bin/kata-runtime /usr/local/bin/kata-runtime
+ln -sf /opt/kata/bin/kata-collect-data.sh /usr/local/bin/kata-collect-data.sh
 
 mkdir -p /etc/docker
-cat > /etc/docker/daemon.json <<EOF
+cat > /etc/docker/daemon.json <<'EOF'
 {
   "runtimes": {
-    "kata-runtime": {
-      "path": "/opt/kata/bin/kata-runtime"
+    "kata": {
+      "path": "/usr/local/bin/containerd-shim-kata-v2",
+      "runtimeArgs": []
     }
-  }
+  },
+  "default-runtime": "runc"
 }
 EOF
 
