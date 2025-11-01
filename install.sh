@@ -34,7 +34,9 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     systemd \
     git \
     ca-certificates \
-    apt-transport-https
+    apt-transport-https \
+    qemu-system-x86 \
+    qemu-utils
 
 echo "==> Installing Docker"
 if [ -f "/usr/share/keyrings/docker-archive-keyring.gpg" ]; then
@@ -56,6 +58,13 @@ rm /tmp/kata.tar.xz
 ln -sf /opt/kata/bin/containerd-shim-kata-v2 /usr/local/bin/containerd-shim-kata-v2
 ln -sf /opt/kata/bin/kata-runtime /usr/local/bin/kata-runtime
 ln -sf /opt/kata/bin/kata-collect-data.sh /usr/local/bin/kata-collect-data.sh
+
+mkdir -p /etc/kata-containers
+cp /opt/kata/share/defaults/kata-containers/configuration-qemu.toml /etc/kata-containers/configuration.toml
+
+sed -i 's|^#kernel = .*|kernel = "/opt/kata/share/kata-containers/vmlinuz.container"|' /etc/kata-containers/configuration.toml
+sed -i 's|^#image = .*|image = "/opt/kata/share/kata-containers/kata-containers.img"|' /etc/kata-containers/configuration.toml
+sed -i 's|^#initrd = .*|initrd = "/opt/kata/share/kata-containers/kata-containers-initrd.img"|' /etc/kata-containers/configuration.toml
 
 mkdir -p /etc/docker
 cat > /etc/docker/daemon.json <<'EOF'
