@@ -3,13 +3,12 @@ package security
 import (
 	"bufio"
 	"fmt"
+	"github.com/magicaleks/qudata-agent-alpha/internal/utils"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/magicaleks/qudata-agent-alpha/pkg/utils"
 )
 
 type MonitorEvent struct {

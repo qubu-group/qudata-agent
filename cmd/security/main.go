@@ -1,13 +1,12 @@
 package main
 
 import (
+	"github.com/magicaleks/qudata-agent-alpha/internal/security"
+	"github.com/magicaleks/qudata-agent-alpha/internal/utils"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
-
-	"github.com/magicaleks/qudata-agent-alpha/pkg/security"
-	"github.com/magicaleks/qudata-agent-alpha/pkg/utils"
 )
 
 func main() {

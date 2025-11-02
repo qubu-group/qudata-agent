@@ -2,13 +2,12 @@ package containers
 
 import (
 	"fmt"
+	"github.com/magicaleks/qudata-agent-alpha/internal/errors"
+	"github.com/magicaleks/qudata-agent-alpha/internal/security"
+	"github.com/magicaleks/qudata-agent-alpha/internal/utils"
 	"os"
 	"os/exec"
 	"strings"
-
-	"github.com/magicaleks/qudata-agent-alpha/pkg/errors"
-	"github.com/magicaleks/qudata-agent-alpha/pkg/security"
-	"github.com/magicaleks/qudata-agent-alpha/pkg/utils"
 )
 
 var (

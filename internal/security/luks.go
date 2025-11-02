@@ -21,12 +21,11 @@ import "C"
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"github.com/magicaleks/qudata-agent-alpha/internal/utils"
 	"os"
 	"os/exec"
 	"sync"
 	"unsafe"
-
-	"github.com/magicaleks/qudata-agent-alpha/pkg/utils"
 )
 
 const (

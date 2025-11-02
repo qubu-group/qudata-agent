@@ -1,24 +1,26 @@
 package main
 
 import (
-	"github.com/magicaleks/qudata-agent-alpha/internal"
+	"github.com/magicaleks/qudata-agent-alpha/internal/containers"
+	"github.com/magicaleks/qudata-agent-alpha/internal/models"
+	"github.com/magicaleks/qudata-agent-alpha/internal/runtime"
+	"github.com/magicaleks/qudata-agent-alpha/internal/security"
 	"github.com/magicaleks/qudata-agent-alpha/internal/server"
-	"github.com/magicaleks/qudata-agent-alpha/pkg/containers"
-	"github.com/magicaleks/qudata-agent-alpha/pkg/security"
-	"github.com/magicaleks/qudata-agent-alpha/pkg/utils"
+	"github.com/magicaleks/qudata-agent-alpha/internal/storage"
+	"github.com/magicaleks/qudata-agent-alpha/internal/utils"
 )
 
 func main() {
 	cleanupOrphanedResources()
 
-	runtime := internal.NewRuntime()
-	if !runtime.Client.Ping() {
+	rt := runtime.NewRuntime()
+	if !rt.Client.Ping() {
 		panic("qudata service is unavailable")
 	}
 
-	initAgent(runtime)
-	go internal.StatsMonitoring(runtime)
-	s := server.NewServer(runtime)
+	initAgent(rt)
+	go rt.StatsMonitoring()
+	s := server.NewServer(rt)
 	s.Run()
 }
 
@@ -29,8 +31,8 @@ func cleanupOrphanedResources() {
 	}
 }
 
-func initAgent(runtime *internal.Runtime) {
-	initRequest := &internal.InitAgentRequest{
+func initAgent(runtime *runtime.Runtime) {
+	initRequest := &models.InitAgentRequest{
 		AgentID:     runtime.AgentId,
 		AgentPort:   runtime.AgentPort,
 		Address:     runtime.AgentAddress,
@@ -43,11 +45,11 @@ func initAgent(runtime *internal.Runtime) {
 		panic("init agent error")
 	}
 	if initResponse.SecretKey != "" {
-		internal.SetSecretKey(initResponse.SecretKey)
+		storage.SetSecretKey(initResponse.SecretKey)
 		runtime.Client.SetSecret(initResponse.SecretKey)
 	}
 	if !initResponse.HostExists {
-		hostRequest := &internal.CreateHostRequest{
+		hostRequest := &models.CreateHostRequest{
 			GPUName:       utils.GetGPUName(),
 			GPUAmount:     utils.GetGPUCount(),
 			VRAM:          utils.GetVRAM(),

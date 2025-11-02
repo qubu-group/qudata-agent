@@ -1,9 +1,8 @@
 package containers
 
 import (
+	"github.com/magicaleks/qudata-agent-alpha/internal/errors"
 	"os/exec"
-
-	"github.com/magicaleks/qudata-agent-alpha/pkg/errors"
 )
 
 func InitSSH() error {

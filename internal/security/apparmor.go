@@ -2,10 +2,9 @@ package security
 
 import (
 	"fmt"
+	"github.com/magicaleks/qudata-agent-alpha/internal/errors"
 	"os"
 	"os/exec"
-
-	"github.com/magicaleks/qudata-agent-alpha/pkg/errors"
 )
 
 // ApplyAppArmorProfile создает и активирует минимальный профиль AppArmor.

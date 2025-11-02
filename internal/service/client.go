@@ -1,16 +1,18 @@
-package internal
+package service
 
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/magicaleks/qudata-agent-alpha/internal/models"
+	"github.com/magicaleks/qudata-agent-alpha/internal/storage"
+	"github.com/magicaleks/qudata-agent-alpha/internal/utils"
 	"io"
 	"net/http"
 	"os"
 	"strings"
 
 	"github.com/hashicorp/go-retryablehttp"
-	"github.com/magicaleks/qudata-agent-alpha/pkg/utils"
 )
 
 const (
@@ -23,7 +25,7 @@ const (
 	ApplicationJsonType = "application/json"
 )
 
-type ServiceClient struct {
+type Client struct {
 	apiKey    string // Qudata API key
 	secretKey string // Agent secret key
 	http      *retryablehttp.Client
@@ -45,19 +47,19 @@ func newResponse[T any](body io.ReadCloser) *response[T] {
 	return &resp
 }
 
-func NewServiceClient() *ServiceClient {
+func NewServiceClient() *Client {
 	apiKey := os.Getenv("QUDATA_API_KEY")
 	if apiKey == "" && !strings.HasPrefix(apiKey, "ak-") {
 		panic("invalid api key")
 	}
-	return &ServiceClient{
+	return &Client{
 		apiKey:    apiKey,
 		http:      retryablehttp.NewClient(),
-		secretKey: GetSecretKey(),
+		secretKey: storage.GetSecretKey(),
 	}
 }
 
-func (c *ServiceClient) SetSecret(secretKey string) {
+func (c *Client) SetSecret(secretKey string) {
 	if secretKey == "" && !strings.HasPrefix(secretKey, "sk-") {
 		panic("invalid secret key")
 	}
@@ -65,7 +67,7 @@ func (c *ServiceClient) SetSecret(secretKey string) {
 	c.apiKey = ""
 }
 
-func (c *ServiceClient) do(method, path string, body any) (*http.Response, error) {
+func (c *Client) do(method, path string, body any) (*http.Response, error) {
 	var buf io.Reader
 	if body != nil {
 		jsonData, err := json.Marshal(body)
@@ -89,33 +91,33 @@ func (c *ServiceClient) do(method, path string, body any) (*http.Response, error
 	return c.http.Do(req)
 }
 
-func (c *ServiceClient) Ping() bool {
+func (c *Client) Ping() bool {
 	resp, err := c.do("GET", "/ping", nil)
 	if err != nil {
 		return false
 	}
-	data := newResponse[EmptyResponse](resp.Body)
+	data := newResponse[models.EmptyResponse](resp.Body)
 	return data.Ok
 }
 
-func (c *ServiceClient) Init(request *InitAgentRequest) *InitAgentResponse {
+func (c *Client) Init(request *models.InitAgentRequest) *models.InitAgentResponse {
 	resp, err := c.do("POST", "/init", request)
 	if err != nil {
 		utils.LogError("failed to init agent: %v", err)
 		return nil
 	}
-	data := newResponse[InitAgentResponse](resp.Body)
+	data := newResponse[models.InitAgentResponse](resp.Body)
 	return data.Data
 }
 
-func (c *ServiceClient) CreateHost(request *CreateHostRequest) {
+func (c *Client) CreateHost(request *models.CreateHostRequest) {
 	_, err := c.do("POST", "/init/host", request)
 	if err != nil {
 		utils.LogWarn("failed to create host: %v", err)
 	}
 }
 
-func (c *ServiceClient) Stats(request *StatsRequest) {
+func (c *Client) Stats(request *models.StatsRequest) {
 	_, err := c.do("POST", "/stats", request)
 	if err != nil {
 		utils.LogWarn("failed to send stats: %v", err)

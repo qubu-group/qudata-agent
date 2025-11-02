@@ -1,20 +1,19 @@
 package server
 
 import (
+	"github.com/magicaleks/qudata-agent-alpha/internal/runtime"
+	"github.com/magicaleks/qudata-agent-alpha/internal/utils"
 	"net/http"
 	"strconv"
 	"time"
-
-	"github.com/magicaleks/qudata-agent-alpha/internal"
-	"github.com/magicaleks/qudata-agent-alpha/pkg/utils"
 )
 
 type Server struct {
-	runtime *internal.Runtime
+	runtime *runtime.Runtime
 	server  *http.Server
 }
 
-func NewServer(runtime *internal.Runtime) *Server {
+func NewServer(runtime *runtime.Runtime) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ping", pingHandler)
 	mux.HandleFunc("/instances", instancesHandler)

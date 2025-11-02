@@ -1,11 +1,16 @@
-package internal
+package storage
 
 import (
 	"bufio"
 	"github.com/google/uuid"
-	"github.com/magicaleks/qudata-agent-alpha/pkg/utils"
+	"github.com/magicaleks/qudata-agent-alpha/internal/utils"
 	"os"
 	"strings"
+)
+
+const (
+	AgentIdPATH     = "/var/lib/gpu-agent/agent_id"
+	AgentSecretPATH = "/run/lib/gpu-agent/agent_secret"
 )
 
 // GetAgentId create or restore agent id

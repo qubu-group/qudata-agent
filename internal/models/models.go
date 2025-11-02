@@ -1,8 +1,8 @@
-package internal
+package models
 
 import (
-	"github.com/magicaleks/qudata-agent-alpha/pkg/containers"
-	"github.com/magicaleks/qudata-agent-alpha/pkg/utils"
+	"github.com/magicaleks/qudata-agent-alpha/internal/containers"
+	"github.com/magicaleks/qudata-agent-alpha/internal/utils"
 )
 
 // EmptyResponse is just empty for ping request
