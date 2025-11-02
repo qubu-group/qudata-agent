@@ -57,26 +57,38 @@ func detectRuntime() string {
 	return "runc"
 }
 
+func GetRuntime() string {
+	return detectedRuntime
+}
+
+func usesLUKS() bool {
+	return detectedRuntime == "kata"
+}
+
 func StartInstance(data CreateInstance) error {
 	if currentContainerID != "" {
 		return errors.InstanceAlreadyRunningError{}
 	}
 
-	if security.IsActive() {
-		security.DeleteVolume()
-	}
-
 	mountPoint := "/var/lib/qudata/secure"
 
-	key := security.CreateVolume(security.VolumeConfig{
-		MountPoint: mountPoint,
-		SizeMB:     data.VolumeSize,
-	})
-	if key == "" {
-		return errors.LUKSVolumeCreateError{}
-	}
+	if usesLUKS() {
+		if security.IsActive() {
+			security.DeleteVolume()
+		}
 
-	exec.Command("chmod", "755", mountPoint).Run()
+		key := security.CreateVolume(security.VolumeConfig{
+			MountPoint: mountPoint,
+			SizeMB:     data.VolumeSize,
+		})
+		if key == "" {
+			return errors.LUKSVolumeCreateError{}
+		}
+
+		exec.Command("chmod", "755", mountPoint).Run()
+	} else {
+		os.MkdirAll(mountPoint, 0755)
+	}
 
 	image := data.Image
 
@@ -84,7 +96,9 @@ func StartInstance(data CreateInstance) error {
 		if data.Login != "" && data.Password != "" {
 			loginCmd := exec.Command("docker", "login", data.Registry, "-u", data.Login, "-p", data.Password)
 			if err := loginCmd.Run(); err != nil {
-				security.DeleteVolume()
+				if usesLUKS() {
+					security.DeleteVolume()
+				}
 				return errors.InstanceStartError{Err: err}
 			}
 		}
@@ -125,7 +139,9 @@ func StartInstance(data CreateInstance) error {
 	cmd := exec.Command("docker", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		security.DeleteVolume()
+		if usesLUKS() {
+			security.DeleteVolume()
+		}
 		return errors.InstanceStartError{Err: fmt.Errorf("%v: %s", err, string(output))}
 	}
 
@@ -144,7 +160,7 @@ func ManageInstance(cmd InstanceCommand) error {
 		return errors.NoInstanceRunningError{}
 	}
 
-	if cmd == StartCommand && !security.IsActive() {
+	if cmd == StartCommand && usesLUKS() && !security.IsActive() {
 		return errors.LUKSVolumeNotActiveError{}
 	}
 
@@ -177,7 +193,9 @@ func StopInstance() error {
 	exec.Command("docker", "stop", currentContainerID).Run()
 	exec.Command("docker", "rm", "-f", currentContainerID).Run()
 
-	security.DeleteVolume()
+	if usesLUKS() {
+		security.DeleteVolume()
+	}
 
 	currentContainerID = ""
 	allocatedPorts = nil

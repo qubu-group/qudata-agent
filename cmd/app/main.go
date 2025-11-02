@@ -25,7 +25,7 @@ func main() {
 }
 
 func cleanupOrphanedResources() {
-	if !containers.InstanceIsRunning() && security.IsActive() {
+	if containers.GetRuntime() == "kata" && !containers.InstanceIsRunning() && security.IsActive() {
 		utils.LogInfo("cleaning up orphaned LUKS volume")
 		security.DeleteVolume()
 	}
