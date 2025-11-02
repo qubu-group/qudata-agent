@@ -2,8 +2,8 @@ package server
 
 import (
 	"encoding/json"
-	containers2 "github.com/magicaleks/qudata-agent-alpha/internal/containers"
-	utils2 "github.com/magicaleks/qudata-agent-alpha/internal/utils"
+	"github.com/magicaleks/qudata-agent-alpha/internal/containers"
+	"github.com/magicaleks/qudata-agent-alpha/internal/utils"
 	"math"
 	"net/http"
 	"strconv"
@@ -41,7 +41,7 @@ type manageInstanceRequest struct {
 }
 
 type instanceStatusResponse struct {
-	Status containers2.InstanceStatus `json:"status"`
+	Status containers.InstanceStatus `json:"status"`
 }
 
 func pingHandler(w http.ResponseWriter, r *http.Request) {
@@ -58,18 +58,18 @@ func sshHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		var req sshKeyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			utils2.LogWarn("ssh add: invalid request: %v", err)
+			utils.LogWarn("ssh add: invalid request: %v", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		if err := containers2.AddSSH(req.SSHPubkey); err != nil {
-			utils2.LogWarn("ssh add failed: %v", err)
+		if err := containers.AddSSH(req.SSHPubkey); err != nil {
+			utils.LogWarn("ssh add failed: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		utils2.LogInfo("ssh key added")
+		utils.LogInfo("ssh key added")
 		resp, _ := json.Marshal(response{Ok: true, Data: nil})
 		w.Write(resp)
 		return
@@ -77,18 +77,18 @@ func sshHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "DELETE" {
 		var req sshKeyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			utils2.LogWarn("ssh remove: invalid request: %v", err)
+			utils.LogWarn("ssh remove: invalid request: %v", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		if err := containers2.RemoveSSH(req.SSHPubkey); err != nil {
-			utils2.LogWarn("ssh remove failed: %v", err)
+		if err := containers.RemoveSSH(req.SSHPubkey); err != nil {
+			utils.LogWarn("ssh remove failed: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		utils2.LogInfo("ssh key removed")
+		utils.LogInfo("ssh key removed")
 		resp, _ := json.Marshal(response{Ok: true, Data: nil})
 		w.Write(resp)
 		return
@@ -98,7 +98,7 @@ func sshHandler(w http.ResponseWriter, r *http.Request) {
 
 func instancesHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
-		status := containers2.GetInstanceStatus()
+		status := containers.GetInstanceStatus()
 		resp, _ := json.Marshal(response{Ok: true, Data: instanceStatusResponse{Status: status}})
 		w.Write(resp)
 		return
@@ -106,7 +106,7 @@ func instancesHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		var req createInstanceRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			utils2.LogWarn("create instance: invalid request: %v", err)
+			utils.LogWarn("create instance: invalid request: %v", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -120,9 +120,9 @@ func instancesHandler(w http.ResponseWriter, r *http.Request) {
 
 		allocatedPorts := make(map[string]string)
 		if len(req.Ports) > 0 {
-			firstPort, _ := utils2.GetPortsRange(len(req.Ports))
+			firstPort, _ := utils.GetPortsRange(len(req.Ports))
 			if firstPort == 0 {
-				utils2.LogError("failed to allocate ports")
+				utils.LogError("failed to allocate ports")
 				http.Error(w, "failed to allocate ports", http.StatusInternalServerError)
 				return
 			}
@@ -135,9 +135,9 @@ func instancesHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		conf := utils2.GetConfiguration()
+		conf := utils.GetConfiguration()
 
-		createData := containers2.CreateInstance{
+		createData := containers.CreateInstance{
 			Image:      image,
 			VolumeSize: int64(math.Min(float64(req.StorageGB*1024), conf.Disk.Amount*1024)),
 			Registry:   req.Registry,
@@ -150,13 +150,13 @@ func instancesHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		go func() {
-			if err := containers2.StartInstance(createData); err != nil {
-				utils2.LogError("failed to start instance: %v", err)
+			if err := containers.StartInstance(createData); err != nil {
+				utils.LogError("failed to start instance: %v", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
 		}()
 
-		utils2.LogInfo("instance created: %s", image)
+		utils.LogInfo("instance created: %s", image)
 		resp, _ := json.Marshal(response{Ok: true, Data: instanceCreatedResponse{Ports: allocatedPorts}})
 		w.Write(resp)
 		return
@@ -164,42 +164,42 @@ func instancesHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "PUT" {
 		var req manageInstanceRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			utils2.LogWarn("manage instance: invalid request: %v", err)
+			utils.LogWarn("manage instance: invalid request: %v", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
 		switch req.Command {
 		case "delete":
-			if err := containers2.StopInstance(); err != nil {
-				utils2.LogError("failed to delete instance: %v", err)
+			if err := containers.StopInstance(); err != nil {
+				utils.LogError("failed to delete instance: %v", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			utils2.LogInfo("instance deleted")
+			utils.LogInfo("instance deleted")
 		case "start":
-			if err := containers2.ManageInstance(containers2.StartCommand); err != nil {
-				utils2.LogError("failed to start instance: %v", err)
+			if err := containers.ManageInstance(containers.StartCommand); err != nil {
+				utils.LogError("failed to start instance: %v", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			utils2.LogInfo("instance started")
+			utils.LogInfo("instance started")
 		case "stop":
-			if err := containers2.ManageInstance(containers2.StopCommand); err != nil {
-				utils2.LogError("failed to stop instance: %v", err)
+			if err := containers.ManageInstance(containers.StopCommand); err != nil {
+				utils.LogError("failed to stop instance: %v", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			utils2.LogInfo("instance stopped")
+			utils.LogInfo("instance stopped")
 		case "restart":
-			if err := containers2.ManageInstance(containers2.RebootCommand); err != nil {
-				utils2.LogError("failed to restart instance: %v", err)
+			if err := containers.ManageInstance(containers.RebootCommand); err != nil {
+				utils.LogError("failed to restart instance: %v", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			utils2.LogInfo("instance restarted")
+			utils.LogInfo("instance restarted")
 		default:
-			utils2.LogWarn("unknown command: %s", req.Command)
+			utils.LogWarn("unknown command: %s", req.Command)
 			http.Error(w, "unknown command", http.StatusBadRequest)
 			return
 		}
@@ -209,13 +209,13 @@ func instancesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == "DELETE" {
-		if err := containers2.StopInstance(); err != nil {
-			utils2.LogError("failed to delete instance: %v", err)
+		if err := containers.StopInstance(); err != nil {
+			utils.LogError("failed to delete instance: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		utils2.LogInfo("instance deleted")
+		utils.LogInfo("instance deleted")
 		resp, _ := json.Marshal(response{Ok: true, Data: nil})
 		w.Write(resp)
 		return

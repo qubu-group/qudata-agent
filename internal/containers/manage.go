@@ -82,6 +82,7 @@ func StartInstance(data CreateInstance) error {
 			SizeMB:     data.VolumeSize,
 		})
 		if key == "" {
+			utils.LogError("Failed to create volume with runtime: %s", GetRuntime())
 			return errors.LUKSVolumeCreateError{}
 		}
 
