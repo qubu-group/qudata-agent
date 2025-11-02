@@ -58,10 +58,6 @@ func detectRuntime() string {
 	return "runc"
 }
 
-func GetRuntime() string {
-	return detectedRuntime
-}
-
 func StartInstance(data CreateInstance) error {
 	if currentContainerID != "" {
 		return errors.InstanceAlreadyRunningError{}
@@ -97,7 +93,11 @@ func StartInstance(data CreateInstance) error {
 	}
 
 	runtime := detectedRuntime
-	args := []string{"run", "-d", "--runtime=" + runtime, "--gpus=all"}
+	args := []string{"run", "-d", "--runtime=" + runtime}
+
+	if runtime == "kata" {
+		args = append(args, "--gpus=all")
+	}
 
 	if data.CPUs != "" {
 		args = append(args, "--cpus="+data.CPUs)

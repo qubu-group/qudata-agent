@@ -115,15 +115,11 @@ EOF
   systemctl enable --now kata-monitor || true
 else
   echo "==> No KVM detected — configuring gVisor (runsc) as micro-VM-like fallback"
-  GV_VER=$(curl -fsSL https://storage.googleapis.com/gvisor/releases/release/stable.txt || echo "latest")
-  if [ "$GV_VER" = "latest" ]; then
-    GV_URL="https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/runsc"
-  else
-    GV_URL="https://storage.googleapis.com/gvisor/releases/release/${GV_VER}/x86_64/runsc"
-  fi
-  curl -fsSL "$GV_URL" -o /usr/local/bin/runsc
-  chmod +x /usr/local/bin/runsc
-  /usr/local/bin/runsc --version || true
+  RUNSC_URL="https://storage.googleapis.com/gvisor/releases/release/latest/x86_64"
+  curl -fsSL "${RUNSC_URL}/runsc" -o /usr/local/bin/runsc
+  curl -fsSL "${RUNSC_URL}/runsc.sha512" -o /tmp/runsc.sha512
+  curl -fsSL "${RUNSC_URL}/containerd-shim-runsc-v1" -o /usr/local/bin/containerd-shim-runsc-v1
+  chmod +x /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1
 
   echo "==> Configuring Docker to use gVisor"
   mkdir -p /etc/docker
