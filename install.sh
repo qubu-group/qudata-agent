@@ -36,6 +36,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     ca-certificates \
     apt-transport-https \
     qemu-system-x86 \
+    qemu-kvm \
     qemu-utils
 
 echo "==> Installing Docker"
@@ -50,36 +51,99 @@ apt-get install -y -qq docker-ce docker-ce-cli containerd.io
 systemctl enable docker
 systemctl start docker
 
-echo "==> Installing Kata Containers"
-KATA_VERSION="3.2.0"
-curl -fsSL https://github.com/kata-containers/kata-containers/releases/download/${KATA_VERSION}/kata-static-${KATA_VERSION}-amd64.tar.xz -o /tmp/kata.tar.xz
-tar -xJf /tmp/kata.tar.xz -C /
-rm /tmp/kata.tar.xz
-ln -sf /opt/kata/bin/containerd-shim-kata-v2 /usr/local/bin/containerd-shim-kata-v2
-ln -sf /opt/kata/bin/kata-runtime /usr/local/bin/kata-runtime
-ln -sf /opt/kata/bin/kata-collect-data.sh /usr/local/bin/kata-collect-data.sh
+echo "==> Detecting virtualization support (KVM/nested)"
+HAS_KVM=0
+if egrep -qw 'vmx|svm' /proc/cpuinfo; then
+  modprobe kvm || true
+  modprobe kvm_intel 2>/dev/null || modprobe kvm_amd 2>/dev/null || true
+  if [ -e /dev/kvm ]; then
+    HAS_KVM=1
+  fi
+fi
+echo "HAS_KVM=$HAS_KVM"
 
-mkdir -p /etc/kata-containers
-cp /opt/kata/share/defaults/kata-containers/configuration-qemu.toml /etc/kata-containers/configuration.toml
+if [ "$HAS_KVM" -eq 1 ]; then
+  echo "==> Installing Kata Containers (KVM detected)"
+  KATA_VERSION="3.2.0"
+  curl -fsSL https://github.com/kata-containers/kata-containers/releases/download/${KATA_VERSION}/kata-static-${KATA_VERSION}-amd64.tar.xz -o /tmp/kata.tar.xz
+  tar -xJf /tmp/kata.tar.xz -C /
+  rm /tmp/kata.tar.xz
+  ln -sf /opt/kata/bin/containerd-shim-kata-v2 /usr/local/bin/containerd-shim-kata-v2
+  ln -sf /opt/kata/bin/kata-runtime /usr/local/bin/kata-runtime
+  ln -sf /opt/kata/bin/kata-collect-data.sh /usr/local/bin/kata-collect-data.sh
 
-sed -i 's|^#kernel = .*|kernel = "/opt/kata/share/kata-containers/vmlinuz.container"|' /etc/kata-containers/configuration.toml
-sed -i 's|^#image = .*|image = "/opt/kata/share/kata-containers/kata-containers.img"|' /etc/kata-containers/configuration.toml
-sed -i 's|^#initrd = .*|initrd = "/opt/kata/share/kata-containers/kata-containers-initrd.img"|' /etc/kata-containers/configuration.toml
+  mkdir -p /etc/kata-containers
+  cp /opt/kata/share/defaults/kata-containers/configuration-qemu.toml /etc/kata-containers/configuration.toml || true
+  # Ensure kernel/initrd/image paths are set
+  sed -i 's|^#\?kernel = .*|kernel = "/opt/kata/share/kata-containers/vmlinuz.container"|' /etc/kata-containers/configuration.toml
+  sed -i 's|^#\?image = .*|image = "/opt/kata/share/kata-containers/kata-containers.img"|' /etc/kata-containers/configuration.toml
+  sed -i 's|^#\?initrd = .*|initrd = "/opt/kata/share/kata-containers/kata-containers-initrd.img"|' /etc/kata-containers/configuration.toml
 
-mkdir -p /etc/docker
-cat > /etc/docker/daemon.json <<'EOF'
+  echo "==> Configuring containerd for Kata (shim v2)"
+  if [ ! -f /etc/containerd/config.toml ]; then
+    containerd config default | tee /etc/containerd/config.toml >/dev/null
+  fi
+  if ! grep -q '\[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata\]' /etc/containerd/config.toml; then
+    cat >>/etc/containerd/config.toml <<'EOC'
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata]
+  runtime_type = "io.containerd.kata.v2"
+  privileged_without_host_devices = true
+EOC
+  fi
+
+  echo "==> Installing nerdctl for Kata usage"
+  NERDCTL_VER="1.7.7"
+  curl -fsSL https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_VER}/nerdctl-${NERDCTL_VER}-linux-amd64.tar.gz -o /tmp/nerdctl.tgz
+  tar -xzf /tmp/nerdctl.tgz -C /usr/local/bin nerdctl
+  rm /tmp/nerdctl.tgz
+
+  echo "==> Configuring Docker (keep runc default; add NVIDIA runtime if present)"
+  mkdir -p /etc/docker
+  cat >/etc/docker/daemon.json <<'EOF'
 {
   "runtimes": {
-    "kata": {
-      "path": "/usr/local/bin/containerd-shim-kata-v2",
+    "nvidia": {
+      "path": "nvidia-container-runtime",
       "runtimeArgs": []
     }
   },
   "default-runtime": "runc"
 }
 EOF
+  systemctl restart containerd
+  systemctl restart docker
+  systemctl enable --now kata-monitor || true
+else
+  echo "==> No KVM detected — configuring gVisor (runsc) as micro-VM-like fallback"
+  GV_VER=$(curl -fsSL https://storage.googleapis.com/gvisor/releases/release/stable.txt || echo "latest")
+  if [ "$GV_VER" = "latest" ]; then
+    GV_URL="https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/runsc"
+  else
+    GV_URL="https://storage.googleapis.com/gvisor/releases/release/${GV_VER}/x86_64/runsc"
+  fi
+  curl -fsSL "$GV_URL" -o /usr/local/bin/runsc
+  chmod +x /usr/local/bin/runsc
+  /usr/local/bin/runsc --version || true
 
-systemctl restart docker
+  echo "==> Configuring Docker to use gVisor"
+  mkdir -p /etc/docker
+  cat >/etc/docker/daemon.json <<'EOF'
+{
+  "runtimes": {
+    "runsc": {
+      "path": "/usr/local/bin/runsc",
+      "runtimeArgs": []
+    },
+    "nvidia": {
+      "path": "nvidia-container-runtime",
+      "runtimeArgs": []
+    }
+  },
+  "default-runtime": "runc"
+}
+EOF
+  systemctl restart docker
+fi
 
 echo "==> Installing NVIDIA drivers"
 ubuntu-drivers autoinstall 2>/dev/null || true
@@ -190,4 +254,3 @@ echo "Agent status: systemctl status qudata-agent"
 echo "Security status: systemctl status qudata-security"
 echo "Agent logs: journalctl -u qudata-agent -f"
 echo "Security logs: journalctl -u qudata-security -f"
-

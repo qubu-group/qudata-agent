@@ -2,16 +2,19 @@ package containers
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/magicaleks/qudata-agent-alpha/pkg/errors"
 	"github.com/magicaleks/qudata-agent-alpha/pkg/security"
+	"github.com/magicaleks/qudata-agent-alpha/pkg/utils"
 )
 
 var (
 	currentContainerID string
 	allocatedPorts     map[string]string
+	detectedRuntime    string
 )
 
 type CreateInstance struct {
@@ -35,6 +38,29 @@ const (
 	StopCommand   InstanceCommand = "stop"
 	RebootCommand InstanceCommand = "reboot"
 )
+
+func init() {
+	detectedRuntime = detectRuntime()
+	utils.LogInfo(fmt.Sprintf("Detected container runtime: %s", detectedRuntime))
+}
+
+func detectRuntime() string {
+	if _, err := os.Stat("/dev/kvm"); err == nil {
+		if exec.Command("kata-runtime", "--version").Run() == nil {
+			return "kata"
+		}
+	}
+
+	if exec.Command("runsc", "--version").Run() == nil {
+		return "runsc"
+	}
+
+	return "runc"
+}
+
+func GetRuntime() string {
+	return detectedRuntime
+}
 
 func StartInstance(data CreateInstance) error {
 	if currentContainerID != "" {
@@ -70,7 +96,8 @@ func StartInstance(data CreateInstance) error {
 		image = data.Registry + "/" + image
 	}
 
-	args := []string{"run", "-d", "--runtime=kata", "--gpus=all"}
+	runtime := detectedRuntime
+	args := []string{"run", "-d", "--runtime=" + runtime, "--gpus=all"}
 
 	if data.CPUs != "" {
 		args = append(args, "--cpus="+data.CPUs)
