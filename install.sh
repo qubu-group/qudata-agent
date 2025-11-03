@@ -131,25 +131,6 @@ else
     install -m 755 /tmp/containerd-shim-runsc-v1 /usr/local/bin/containerd-shim-runsc-v1
     rm -f /tmp/containerd-shim-runsc-v1
   fi
-
-  echo "==> Configuring Docker to use gVisor"
-  mkdir -p /etc/docker
-  cat >/etc/docker/daemon.json <<'EOF'
-{
-  "runtimes": {
-    "runsc": {
-      "path": "/usr/local/bin/runsc",
-      "runtimeArgs": []
-    },
-    "nvidia": {
-      "path": "nvidia-container-runtime",
-      "runtimeArgs": []
-    }
-  },
-  "default-runtime": "runc"
-}
-EOF
-  systemctl restart docker
 fi
 
 echo "==> Installing NVIDIA drivers"
@@ -170,6 +151,43 @@ curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-contai
 apt-get update -qq
 apt-get install -y -qq nvidia-container-toolkit
 nvidia-ctk runtime configure --runtime=docker
+
+echo "==> Configuring Docker daemon with GPU support"
+if [ "$HAS_KVM" -eq 1 ]; then
+  cat >/etc/docker/daemon.json <<'EOF'
+{
+  "runtimes": {
+    "nvidia": {
+      "path": "nvidia-container-runtime",
+      "runtimeArgs": []
+    }
+  },
+  "default-runtime": "runc"
+}
+EOF
+else
+  echo "==> Configuring gVisor nvproxy for GPU support"
+  /usr/local/bin/runsc nvproxy list-supported-drivers 2>/dev/null || echo "nvproxy check skipped"
+  
+  cat >/etc/docker/daemon.json <<'EOF'
+{
+  "runtimes": {
+    "runsc": {
+      "path": "/usr/local/bin/runsc",
+      "runtimeArgs": [
+        "--nvproxy"
+      ]
+    },
+    "nvidia": {
+      "path": "nvidia-container-runtime",
+      "runtimeArgs": []
+    }
+  },
+  "default-runtime": "runc"
+}
+EOF
+fi
+
 systemctl restart docker
 
 echo "==> Installing Go"

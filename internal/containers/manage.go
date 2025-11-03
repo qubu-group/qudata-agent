@@ -109,8 +109,12 @@ func StartInstance(data CreateInstance) error {
 	runtime := detectedRuntime
 	args := []string{"run", "-d", "--runtime=" + runtime}
 
-	if runtime == "kata" {
+	if runtime == "kata" || runtime == "runsc" {
 		args = append(args, "--gpus=all")
+		if runtime == "runsc" {
+			args = append(args, "-e", "NVIDIA_VISIBLE_DEVICES=all")
+			args = append(args, "-e", "NVIDIA_DRIVER_CAPABILITIES=compute,utility")
+		}
 	}
 
 	if data.CPUs != "" {
