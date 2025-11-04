@@ -20,16 +20,21 @@ LOG_DIR="/var/log/qudata"
 echo "==> Creating directories"
 mkdir -p $INSTALL_DIR $BIN_DIR $LOG_DIR /var/lib/qudata
 
-echo "==> Fixing broken packages"
-dpkg --configure -a 2>&1 | grep -v nvidia || true
-apt-get -f install -y 2>&1 | grep -v nvidia || true
+echo "==> Cleaning up broken NVIDIA DKMS packages"
+if lsmod | grep -q nvidia && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+  echo "NVIDIA drivers working, removing problematic DKMS packages"
+  DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y nvidia-dkms-* 2>/dev/null || true
+  apt-get autoremove -y 2>/dev/null || true
+else
+  dpkg --configure -a 2>/dev/null || true
+  apt-get -f install -y 2>/dev/null || true
+fi
 
 echo "==> Installing system dependencies"
 apt-get update -qq
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
-apt-mark hold nvidia-dkms-* 2>/dev/null || true
 
 apt-get install -y -qq \
     curl \
@@ -46,9 +51,7 @@ apt-get install -y -qq \
     apt-transport-https \
     qemu-system-x86 \
     qemu-kvm \
-    qemu-utils 2>&1 | grep -v "nvidia-dkms" || true
-
-apt-mark unhold nvidia-dkms-* 2>/dev/null || true
+    qemu-utils
 
 echo "==> Installing Docker"
 if [ -f "/usr/share/keyrings/docker-archive-keyring.gpg" ]; then
