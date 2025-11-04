@@ -20,9 +20,18 @@ LOG_DIR="/var/log/qudata"
 echo "==> Creating directories"
 mkdir -p $INSTALL_DIR $BIN_DIR $LOG_DIR /var/lib/qudata
 
+echo "==> Fixing broken packages"
+dpkg --configure -a 2>&1 | grep -v nvidia || true
+apt-get -f install -y 2>&1 | grep -v nvidia || true
+
 echo "==> Installing system dependencies"
 apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+apt-mark hold nvidia-dkms-* 2>/dev/null || true
+
+apt-get install -y -qq \
     curl \
     wget \
     gnupg \
@@ -37,7 +46,9 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     apt-transport-https \
     qemu-system-x86 \
     qemu-kvm \
-    qemu-utils
+    qemu-utils 2>&1 | grep -v "nvidia-dkms" || true
+
+apt-mark unhold nvidia-dkms-* 2>/dev/null || true
 
 echo "==> Installing Docker"
 if [ -f "/usr/share/keyrings/docker-archive-keyring.gpg" ]; then
@@ -133,7 +144,6 @@ else
 fi
 
 echo "==> Checking NVIDIA drivers"
-dpkg --configure -a 2>/dev/null || true
 
 if lsmod | grep -q nvidia && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
   echo "NVIDIA drivers loaded and working"
