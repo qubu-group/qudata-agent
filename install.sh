@@ -133,68 +133,38 @@ else
 fi
 
 echo "==> Checking NVIDIA drivers"
-
 dpkg --configure -a 2>/dev/null || true
-apt-get -f install -y 2>/dev/null || true
 
-if [ -e /dev/nvidia0 ] && [ -e /dev/nvidiactl ]; then
-  echo "NVIDIA drivers already loaded and working"
-  apt-get install -y -qq --no-install-recommends libnvidia-ml-dev 2>/dev/null || true
-elif command -v nvidia-smi >/dev/null 2>&1; then
-  echo "NVIDIA drivers installed, attempting to load modules"
-  modprobe nvidia 2>/dev/null || echo "Module load failed (reboot required)"
-  modprobe nvidia-uvm 2>/dev/null || true
-  apt-get install -y -qq --no-install-recommends libnvidia-ml-dev 2>/dev/null || true
-elif lspci | grep -i nvidia >/dev/null 2>&1; then
-  echo "NVIDIA GPU detected, installing minimal driver package"
-  
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-      nvidia-utils-535 \
-      libnvidia-compute-535 \
-      libnvidia-ml-dev 2>/dev/null || echo "Driver installation skipped"
-  
-  modprobe nvidia 2>/dev/null || echo "Module load failed (reboot required)"
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+  echo "NVIDIA drivers already installed and working"
+elif lspci 2>/dev/null | grep -qi nvidia; then
+  echo "NVIDIA GPU detected, installing drivers"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ubuntu-drivers-common
+  ubuntu-drivers install --gpgpu 2>/dev/null || ubuntu-drivers install 2>/dev/null || true
+  echo "Driver installation complete (reboot required)"
 else
   echo "No NVIDIA GPU detected"
 fi
 
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libnvidia-ml-dev 2>/dev/null || true
+
 echo "==> Installing NVIDIA Container Toolkit"
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey 2>/dev/null | \
+  gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null || true
 
-if command -v nvidia-ctk >/dev/null 2>&1; then
-  echo "NVIDIA Container Toolkit already installed"
-  nvidia-ctk runtime configure --runtime=docker 2>/dev/null || true
-else
-  if [ -f "/etc/apt/sources.list.d/nvidia-container-toolkit.list" ]; then
-    rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list
-  fi
-  if [ -f "/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg" ]; then
-    rm -f /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-  fi
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list 2>/dev/null | \
+  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+  tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null 2>&1 || true
 
-  if curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null && \
-     curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-       sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-       tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null 2>&1; then
-    
-    apt-get update -qq 2>/dev/null
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nvidia-container-toolkit 2>/dev/null && \
-      nvidia-ctk runtime configure --runtime=docker 2>/dev/null
-  else
-    echo "Failed to setup NVIDIA Container Toolkit repository, skipping"
-  fi
-fi
+apt-get update -qq 2>/dev/null || true
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nvidia-container-toolkit 2>/dev/null || true
+nvidia-ctk runtime configure --runtime=docker 2>/dev/null || true
 
-echo "==> Configuring Docker daemon with GPU support"
+echo "==> Configuring Docker daemon"
 
 HAS_GPU=0
-if [ -e /dev/nvidiactl ] && [ -e /dev/nvidia0 ]; then
+if [ -e /dev/nvidia0 ]; then
   HAS_GPU=1
-  echo "GPU devices ready"
-elif lspci | grep -i nvidia >/dev/null 2>&1; then
-  echo "NVIDIA GPU present but drivers not loaded (reboot may be required)"
-  HAS_GPU=0
-else
-  echo "No GPU detected"
 fi
 
 if [ "$HAS_KVM" -eq 1 ]; then
@@ -332,13 +302,14 @@ cd /
 rm -rf /tmp/qudata-agent-alpha
 
 echo "==> Installation complete"
-echo ""
 
-if lspci | grep -i nvidia >/dev/null 2>&1 && [ ! -e /dev/nvidia0 ]; then
-  echo "IMPORTANT: NVIDIA GPU detected but drivers not loaded"
-  echo "Please reboot the system to activate GPU drivers"
-
-  echo ""
+if ! command -v nvidia-smi >/dev/null 2>&1 || ! nvidia-smi >/dev/null 2>&1; then
+  if lspci 2>/dev/null | grep -qi nvidia; then
+    echo ""
+    echo "NOTE: NVIDIA drivers installed but not loaded"
+    echo "  Please reboot: sudo reboot"
+    echo ""
+  fi
 fi
 
 echo "Installation completed successfully!"
