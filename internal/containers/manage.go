@@ -43,6 +43,15 @@ func init() {
 	utils.LogInfo(fmt.Sprintf("Detected container runtime: %s", detectedRuntime))
 }
 
+func hasGPU() bool {
+	if _, err := os.Stat("/dev/nvidiactl"); err == nil {
+		if _, err := os.Stat("/dev/nvidia0"); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func detectRuntime() string {
 	if _, err := os.Stat("/dev/kvm"); err == nil {
 		if exec.Command("kata-runtime", "--version").Run() == nil {
@@ -109,9 +118,11 @@ func StartInstance(data CreateInstance) error {
 	runtime := detectedRuntime
 	args := []string{"run", "-d", "--runtime=" + runtime}
 
-	if runtime == "kata" || runtime == "runsc" {
-		args = append(args, "--gpus=all")
-		if runtime == "runsc" {
+	if hasGPU() {
+		if runtime == "kata" {
+			args = append(args, "--gpus=all")
+		} else if runtime == "runsc" {
+			args = append(args, "--gpus=all")
 			args = append(args, "-e", "NVIDIA_VISIBLE_DEVICES=all")
 			args = append(args, "-e", "NVIDIA_DRIVER_CAPABILITIES=compute,utility")
 		}

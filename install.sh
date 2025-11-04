@@ -153,6 +153,15 @@ apt-get install -y -qq nvidia-container-toolkit
 nvidia-ctk runtime configure --runtime=docker
 
 echo "==> Configuring Docker daemon with GPU support"
+
+HAS_GPU=0
+if [ -e /dev/nvidiactl ] && [ -e /dev/nvidia0 ]; then
+  HAS_GPU=1
+  echo "GPU detected"
+else
+  echo "No GPU detected, skipping GPU configuration"
+fi
+
 if [ "$HAS_KVM" -eq 1 ]; then
   cat >/etc/docker/daemon.json <<'EOF'
 {
@@ -166,10 +175,11 @@ if [ "$HAS_KVM" -eq 1 ]; then
 }
 EOF
 else
-  echo "==> Configuring gVisor nvproxy for GPU support"
-  /usr/local/bin/runsc nvproxy list-supported-drivers 2>/dev/null || echo "nvproxy check skipped"
-  
-  cat >/etc/docker/daemon.json <<'EOF'
+  if [ "$HAS_GPU" -eq 1 ]; then
+    echo "==> Configuring gVisor nvproxy for GPU support"
+    /usr/local/bin/runsc nvproxy list-supported-drivers 2>/dev/null || echo "nvproxy check skipped"
+    
+    cat >/etc/docker/daemon.json <<'EOF'
 {
   "runtimes": {
     "runsc": {
@@ -186,6 +196,19 @@ else
   "default-runtime": "runc"
 }
 EOF
+  else
+    cat >/etc/docker/daemon.json <<'EOF'
+{
+  "runtimes": {
+    "runsc": {
+      "path": "/usr/local/bin/runsc",
+      "runtimeArgs": []
+    }
+  },
+  "default-runtime": "runc"
+}
+EOF
+  fi
 fi
 
 systemctl restart docker
