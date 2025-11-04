@@ -132,45 +132,57 @@ else
   fi
 fi
 
-echo "==> Installing NVIDIA drivers (lightweight)"
+echo "==> Checking NVIDIA drivers"
 
-if lspci | grep -i nvidia >/dev/null 2>&1; then
-  echo "NVIDIA GPU detected, installing drivers"
+dpkg --configure -a 2>/dev/null || true
+apt-get -f install -y 2>/dev/null || true
+
+if [ -e /dev/nvidia0 ] && [ -e /dev/nvidiactl ]; then
+  echo "NVIDIA drivers already loaded and working"
+  apt-get install -y -qq --no-install-recommends libnvidia-ml-dev 2>/dev/null || true
+elif command -v nvidia-smi >/dev/null 2>&1; then
+  echo "NVIDIA drivers installed, attempting to load modules"
+  modprobe nvidia 2>/dev/null || echo "Module load failed (reboot required)"
+  modprobe nvidia-uvm 2>/dev/null || true
+  apt-get install -y -qq --no-install-recommends libnvidia-ml-dev 2>/dev/null || true
+elif lspci | grep -i nvidia >/dev/null 2>&1; then
+  echo "NVIDIA GPU detected, installing minimal driver package"
   
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-      nvidia-driver-535 \
       nvidia-utils-535 \
       libnvidia-compute-535 \
-      libnvidia-ml-dev || {
-        echo "Failed to install drivers, trying alternative method"
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            nvidia-utils-535 \
-            libnvidia-ml-dev || echo "NVIDIA drivers installation skipped"
-      }
+      libnvidia-ml-dev 2>/dev/null || echo "Driver installation skipped"
   
-  modprobe nvidia 2>/dev/null || echo "NVIDIA module not loaded yet (may require reboot)"
-  modprobe nvidia-uvm 2>/dev/null || true
+  modprobe nvidia 2>/dev/null || echo "Module load failed (reboot required)"
 else
-  echo "No NVIDIA GPU detected, skipping driver installation"
-  apt-get install -y -qq libnvidia-ml-dev 2>/dev/null || true
+  echo "No NVIDIA GPU detected"
 fi
 
 echo "==> Installing NVIDIA Container Toolkit"
-if [ -f "/etc/apt/sources.list.d/nvidia-container-toolkit.list" ]; then
-  rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list
-fi
-if [ -f "/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg" ]; then
-  rm -f /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-fi
 
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null || echo "GPG key installation failed"
-curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-    sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-    tee /etc/apt/sources.list.d/nvidia-container-toolkit.list 2>/dev/null || echo "Repository setup failed"
+if command -v nvidia-ctk >/dev/null 2>&1; then
+  echo "NVIDIA Container Toolkit already installed"
+  nvidia-ctk runtime configure --runtime=docker 2>/dev/null || true
+else
+  if [ -f "/etc/apt/sources.list.d/nvidia-container-toolkit.list" ]; then
+    rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list
+  fi
+  if [ -f "/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg" ]; then
+    rm -f /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+  fi
 
-apt-get update -qq 2>/dev/null || true
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nvidia-container-toolkit 2>/dev/null || echo "NVIDIA Container Toolkit installation skipped"
-nvidia-ctk runtime configure --runtime=docker 2>/dev/null || true
+  if curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null && \
+     curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+       sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+       tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null 2>&1; then
+    
+    apt-get update -qq 2>/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nvidia-container-toolkit 2>/dev/null && \
+      nvidia-ctk runtime configure --runtime=docker 2>/dev/null
+  else
+    echo "Failed to setup NVIDIA Container Toolkit repository, skipping"
+  fi
+fi
 
 echo "==> Configuring Docker daemon with GPU support"
 
@@ -321,16 +333,11 @@ rm -rf /tmp/qudata-agent-alpha
 
 echo "==> Installation complete"
 echo ""
-echo "Agent status: systemctl status qudata-agent"
-echo "Security status: systemctl status qudata-security"
-echo "Agent logs: journalctl -u qudata-agent -f"
-echo "Security logs: journalctl -u qudata-security -f"
-echo ""
 
 if lspci | grep -i nvidia >/dev/null 2>&1 && [ ! -e /dev/nvidia0 ]; then
-  echo "  IMPORTANT: NVIDIA GPU detected but drivers not loaded"
-  echo "  Please reboot the system to activate GPU drivers"
-  echo "  After reboot, verify with: nvidia-smi"
+  echo "IMPORTANT: NVIDIA GPU detected but drivers not loaded"
+  echo "Please reboot the system to activate GPU drivers"
+
   echo ""
 fi
 
