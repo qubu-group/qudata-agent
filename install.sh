@@ -20,15 +20,25 @@ LOG_DIR="/var/log/qudata"
 echo "==> Creating directories"
 mkdir -p $INSTALL_DIR $BIN_DIR $LOG_DIR /var/lib/qudata
 
-echo "==> Cleaning up broken NVIDIA DKMS packages"
-if lsmod | grep -q nvidia && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
-  echo "NVIDIA drivers working, removing problematic DKMS packages"
-  DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y nvidia-dkms-* 2>/dev/null || true
+echo "==> Removing old NVIDIA installations"
+if lspci 2>/dev/null | grep -qi nvidia; then
+  echo "NVIDIA GPU detected, cleaning old packages"
+  systemctl stop nvidia-persistenced 2>/dev/null || true
+  
+  DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y nvidia-* libnvidia-* 2>/dev/null || true
   apt-get autoremove -y 2>/dev/null || true
+  apt-get autoclean 2>/dev/null || true
+  
+  rm -rf /etc/modprobe.d/nvidia*.conf 2>/dev/null || true
+  rm -rf /usr/share/X11/xorg.conf.d/nvidia*.conf 2>/dev/null || true
+  
+  echo "Old NVIDIA packages removed"
 else
-  dpkg --configure -a 2>/dev/null || true
-  apt-get -f install -y 2>/dev/null || true
+  echo "No NVIDIA GPU detected"
 fi
+
+dpkg --configure -a 2>/dev/null || true
+apt-get -f install -y 2>/dev/null || true
 
 echo "==> Installing system dependencies"
 apt-get update -qq
@@ -146,35 +156,24 @@ else
   fi
 fi
 
-echo "==> Checking NVIDIA drivers"
-
-if lsmod | grep -q nvidia && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
-  echo "NVIDIA drivers loaded and working"
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libnvidia-ml-dev 2>/dev/null || true
-elif lspci 2>/dev/null | grep -qi nvidia; then
-  echo "NVIDIA GPU detected"
+echo "==> Installing fresh NVIDIA drivers"
+if lspci 2>/dev/null | grep -qi nvidia; then
+  echo "Installing NVIDIA driver 535"
   
-  if dpkg -l | grep -q nvidia-driver; then
-    echo "NVIDIA driver package installed, loading modules"
-    modprobe nvidia 2>/dev/null || echo "Module load failed (reboot required)"
-    modprobe nvidia-uvm 2>/dev/null || true
-  else
-    echo "Installing NVIDIA driver (without DKMS rebuild)"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-      nvidia-driver-535-server \
-      nvidia-utils-535-server \
-      libnvidia-compute-535-server \
-      libnvidia-ml-dev || {
-        echo "Server driver failed, trying desktop version"
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-          nvidia-driver-535 \
-          libnvidia-ml-dev || echo "Driver installation skipped"
-      }
-  fi
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    nvidia-driver-535 \
+    nvidia-utils-535 \
+    libnvidia-compute-535 \
+    libnvidia-encode-535 \
+    libnvidia-decode-535 \
+    libnvidia-ml-dev
   
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libnvidia-ml-dev 2>/dev/null || true
+  modprobe nvidia 2>/dev/null || echo "Module not loaded (reboot required)"
+  modprobe nvidia-uvm 2>/dev/null || true
+  
+  echo "NVIDIA driver 535 installed"
 else
-  echo "No NVIDIA GPU detected"
+  echo "No NVIDIA GPU, installing only dev headers"
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libnvidia-ml-dev 2>/dev/null || true
 fi
 
