@@ -135,18 +135,35 @@ fi
 echo "==> Checking NVIDIA drivers"
 dpkg --configure -a 2>/dev/null || true
 
-if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
-  echo "NVIDIA drivers already installed and working"
+if lsmod | grep -q nvidia && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+  echo "NVIDIA drivers loaded and working"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libnvidia-ml-dev 2>/dev/null || true
 elif lspci 2>/dev/null | grep -qi nvidia; then
-  echo "NVIDIA GPU detected, installing drivers"
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ubuntu-drivers-common
-  ubuntu-drivers install --gpgpu 2>/dev/null || ubuntu-drivers install 2>/dev/null || true
-  echo "Driver installation complete (reboot required)"
+  echo "NVIDIA GPU detected"
+  
+  if dpkg -l | grep -q nvidia-driver; then
+    echo "NVIDIA driver package installed, loading modules"
+    modprobe nvidia 2>/dev/null || echo "Module load failed (reboot required)"
+    modprobe nvidia-uvm 2>/dev/null || true
+  else
+    echo "Installing NVIDIA driver (without DKMS rebuild)"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+      nvidia-driver-535-server \
+      nvidia-utils-535-server \
+      libnvidia-compute-535-server \
+      libnvidia-ml-dev || {
+        echo "Server driver failed, trying desktop version"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+          nvidia-driver-535 \
+          libnvidia-ml-dev || echo "Driver installation skipped"
+      }
+  fi
+  
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libnvidia-ml-dev 2>/dev/null || true
 else
   echo "No NVIDIA GPU detected"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libnvidia-ml-dev 2>/dev/null || true
 fi
-
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libnvidia-ml-dev 2>/dev/null || true
 
 echo "==> Installing NVIDIA Container Toolkit"
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey 2>/dev/null | \
