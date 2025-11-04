@@ -3,7 +3,6 @@ package service
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"github.com/magicaleks/qudata-agent-alpha/internal/models"
 	"github.com/magicaleks/qudata-agent-alpha/internal/storage"
 	"github.com/magicaleks/qudata-agent-alpha/internal/utils"
@@ -71,7 +70,6 @@ func (c *Client) do(method, path string, body any) (*http.Response, error) {
 	var buf io.Reader
 	if body != nil {
 		jsonData, err := json.Marshal(body)
-		fmt.Println(string(jsonData))
 		if err != nil {
 			return nil, err
 		}

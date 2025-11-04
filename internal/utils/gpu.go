@@ -11,9 +11,10 @@ double get_gpu_vram();
 double get_max_cuda_version();
 */
 import "C"
+import "math"
 
 func GetGPUCount() int {
-	return int(C.get_gpu_count())
+	return int(math.Max(float64(C.get_gpu_count()), 1))
 }
 
 func GetGPUName() string {

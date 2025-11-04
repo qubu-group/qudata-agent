@@ -183,7 +183,7 @@ func ManageInstance(cmd InstanceCommand) error {
 	var dockerCmd string
 	switch cmd {
 	case StartCommand:
-		dockerCmd = "start"
+		dockerCmd = "unpause"
 	case StopCommand:
 		dockerCmd = "pause"
 	case RebootCommand:

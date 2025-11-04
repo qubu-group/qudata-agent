@@ -49,7 +49,7 @@ func (r *Runtime) StatsMonitoring() {
 				Status: containers.GetInstanceStatus(),
 			}
 			r.Client.Stats(request)
-			time.Sleep(1500 * time.Millisecond)
+			time.Sleep(500 * time.Millisecond)
 		}
 	}
 }
