@@ -22,17 +22,32 @@ mkdir -p $INSTALL_DIR $BIN_DIR $LOG_DIR /var/lib/qudata
 
 echo "==> Removing old NVIDIA installations"
 if lspci 2>/dev/null | grep -qi nvidia; then
-  echo "NVIDIA GPU detected, cleaning old packages"
-  systemctl stop nvidia-persistenced 2>/dev/null || true
+  echo "NVIDIA GPU detected, force removing old packages"
   
-  DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y nvidia-* libnvidia-* 2>/dev/null || true
+  systemctl stop nvidia-persistenced 2>/dev/null || true
+  rmmod nvidia_uvm 2>/dev/null || true
+  rmmod nvidia_drm 2>/dev/null || true
+  rmmod nvidia_modeset 2>/dev/null || true
+  rmmod nvidia 2>/dev/null || true
+  
+  rm -rf /var/lib/dkms/nvidia* 2>/dev/null || true
+  rm -f /etc/kernel/postinst.d/dkms 2>/dev/null || true
+  
+  for pkg in $(dpkg -l | grep nvidia | awk '{print $2}'); do
+    dpkg --remove --force-remove-reinstreq --force-depends $pkg 2>/dev/null || true
+  done
+  
+  for pkg in $(dpkg -l | grep libnvidia | awk '{print $2}'); do
+    dpkg --remove --force-remove-reinstreq --force-depends $pkg 2>/dev/null || true
+  done
+  
   apt-get autoremove -y 2>/dev/null || true
   apt-get autoclean 2>/dev/null || true
   
   rm -rf /etc/modprobe.d/nvidia*.conf 2>/dev/null || true
   rm -rf /usr/share/X11/xorg.conf.d/nvidia*.conf 2>/dev/null || true
   
-  echo "Old NVIDIA packages removed"
+  echo "Old NVIDIA packages force removed"
 else
   echo "No NVIDIA GPU detected"
 fi
