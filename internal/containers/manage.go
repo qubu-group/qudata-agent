@@ -195,6 +195,8 @@ func ManageInstance(cmd InstanceCommand) error {
 		return errors.UnknownCommandError{Command: string(cmd)}
 	}
 
+	utils.LogWarn("Manage command: docker %s %s", dockerCmd, currentContainerID)
+
 	if err := exec.Command("docker", dockerCmd, currentContainerID).Run(); err != nil {
 		return errors.InstanceManageError{Err: err}
 	}
