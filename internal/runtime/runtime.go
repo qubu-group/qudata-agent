@@ -44,15 +44,12 @@ func NewRuntime() *Runtime {
 func (r *Runtime) StatsMonitoring() {
 	var request *models.StatsRequest
 	for {
-		if r.InstanceExists {
+		if containers.InstanceIsRunning() {
 			request = &models.StatsRequest{
 				Status: containers.GetInstanceStatus(),
 			}
 			r.Client.Stats(request)
 			time.Sleep(800 * time.Millisecond)
-		} else {
-			time.Sleep(5 * time.Second)
-			r.InstanceExists = containers.InstanceIsRunning()
 		}
 	}
 }

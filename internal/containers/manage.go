@@ -174,7 +174,7 @@ func ManageInstance(cmd InstanceCommand) error {
 	case StartCommand:
 		dockerCmd = "start"
 	case StopCommand:
-		dockerCmd = "stop"
+		dockerCmd = "pause"
 	case RebootCommand:
 		if err := exec.Command("docker", "restart", currentContainerID).Run(); err != nil {
 			return errors.InstanceManageError{Err: err}

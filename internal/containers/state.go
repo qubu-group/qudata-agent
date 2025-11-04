@@ -36,7 +36,11 @@ func GetInstanceStatus() InstanceStatus {
 	case "restarting":
 		return RebootingStatus
 	case "exited", "dead":
-		return DestroyedStatus
+		if currentContainerID == "" {
+			return DestroyedStatus
+		} else {
+			return PausedStatus
+		}
 	case "created":
 		return PendingStatus
 	default:
