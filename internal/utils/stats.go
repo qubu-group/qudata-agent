@@ -8,8 +8,8 @@ import (
 )
 
 var (
-	lastInetIn  int
-	lastInetOut int
+	lastInetIn  int64
+	lastInetOut int64
 	netMutex    sync.Mutex
 )
 
@@ -49,19 +49,27 @@ func GetCPUUtil() float64 {
 }
 
 func GetRAMUtil() float64 {
-	cmd := exec.Command("sh", "-c", "free | grep Mem | awk '{print ($3/$2) * 100.0}'")
+	cmd := exec.Command("free", "-b")
 	output, err := cmd.Output()
 	if err != nil {
 		LogWarn("Get RAM Utilization: %s", err.Error())
 		return 0.0
 	}
 
-	util, err := strconv.ParseFloat(strings.TrimSpace(string(output)), 64)
-	if err != nil {
-		LogWarn("Get RAM Utilization: %s", err.Error())
-		return 0.0
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Mem:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 3 {
+				total, err1 := strconv.ParseFloat(fields[1], 64)
+				used, err2 := strconv.ParseFloat(fields[2], 64)
+				if err1 == nil && err2 == nil && total > 0 {
+					return (used / total) * 100.0
+				}
+			}
+		}
 	}
-	return util
+	return 0.0
 }
 
 func GetMemUtil() float64 {
@@ -83,30 +91,44 @@ func GetMemUtil() float64 {
 	return util
 }
 
-func getNetworkBytes() (int, int) {
-	cmdIn := exec.Command("sh", "-c", "cat /proc/net/dev | grep -v lo | awk 'NR>2 {sum+=$2} END {print sum}'")
-	outputIn, err := cmdIn.Output()
+func getNetworkBytes() (int64, int64) {
+	cmd := exec.Command("cat", "/proc/net/dev")
+	output, err := cmd.Output()
 	if err != nil {
 		return 0, 0
 	}
 
-	bytesIn, err := strconv.Atoi(strings.TrimSpace(string(outputIn)))
-	if err != nil {
-		bytesIn = 0
+	var totalIn, totalOut int64
+	lines := strings.Split(string(output), "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.Contains(line, ":") {
+			continue
+		}
+
+		parts := strings.Split(line, ":")
+		if len(parts) != 2 {
+			continue
+		}
+
+		iface := strings.TrimSpace(parts[0])
+		if iface == "lo" {
+			continue
+		}
+
+		fields := strings.Fields(parts[1])
+		if len(fields) >= 9 {
+			bytesIn, err1 := strconv.ParseInt(fields[0], 10, 64)
+			bytesOut, err2 := strconv.ParseInt(fields[8], 10, 64)
+			if err1 == nil && err2 == nil {
+				totalIn += bytesIn
+				totalOut += bytesOut
+			}
+		}
 	}
 
-	cmdOut := exec.Command("sh", "-c", "cat /proc/net/dev | grep -v lo | awk 'NR>2 {sum+=$10} END {print sum}'")
-	outputOut, err := cmdOut.Output()
-	if err != nil {
-		return bytesIn, 0
-	}
-
-	bytesOut, err := strconv.Atoi(strings.TrimSpace(string(outputOut)))
-	if err != nil {
-		bytesOut = 0
-	}
-
-	return bytesIn, bytesOut
+	return totalIn, totalOut
 }
 
 func GetInetIn() int {
@@ -117,16 +139,17 @@ func GetInetIn() int {
 
 	if lastInetIn == 0 {
 		lastInetIn = currentIn
-		return 0
+		return int(currentIn)
 	}
 
 	delta := currentIn - lastInetIn
 	lastInetIn = currentIn
 
 	if delta < 0 {
-		return 0
+		lastInetIn = currentIn
+		return int(currentIn)
 	}
-	return delta
+	return int(delta)
 }
 
 func GetInetOut() int {
@@ -137,14 +160,15 @@ func GetInetOut() int {
 
 	if lastInetOut == 0 {
 		lastInetOut = currentOut
-		return 0
+		return int(currentOut)
 	}
 
 	delta := currentOut - lastInetOut
 	lastInetOut = currentOut
 
 	if delta < 0 {
-		return 0
+		lastInetOut = currentOut
+		return int(currentOut)
 	}
-	return delta
+	return int(delta)
 }
