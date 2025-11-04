@@ -36,11 +36,13 @@ func GetCPUUtil() float64 {
 	cmd := exec.Command("sh", "-c", "top -bn1 | grep 'Cpu(s)' | sed 's/.*, *\\([0-9.]*\\)%* id.*/\\1/' | awk '{print 100 - $1}'")
 	output, err := cmd.Output()
 	if err != nil {
+		LogWarn("Get CPU Utilization: %s", err.Error())
 		return 0.0
 	}
 
 	util, err := strconv.ParseFloat(strings.TrimSpace(string(output)), 64)
 	if err != nil {
+		LogWarn("Get CPU Utilization: %s", err.Error())
 		return 0.0
 	}
 	return util
@@ -50,11 +52,13 @@ func GetRAMUtil() float64 {
 	cmd := exec.Command("sh", "-c", "free | grep Mem | awk '{print ($3/$2) * 100.0}'")
 	output, err := cmd.Output()
 	if err != nil {
+		LogWarn("Get RAM Utilization: %s", err.Error())
 		return 0.0
 	}
 
 	util, err := strconv.ParseFloat(strings.TrimSpace(string(output)), 64)
 	if err != nil {
+		LogWarn("Get RAM Utilization: %s", err.Error())
 		return 0.0
 	}
 	return util
