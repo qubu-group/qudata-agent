@@ -112,7 +112,6 @@ EOC
 EOF
   systemctl restart containerd
   systemctl restart docker
-  systemctl enable --now kata-monitor || true
 else
   echo "==> No KVM detected — configuring gVisor (runsc) as micro-VM-like fallback"
   
@@ -133,33 +132,57 @@ else
   fi
 fi
 
-echo "==> Installing NVIDIA drivers"
-ubuntu-drivers autoinstall 2>/dev/null || true
-apt-get install -y -qq nvidia-utils-535 libnvidia-ml-dev 2>/dev/null || apt-get install -y -qq libnvidia-ml-dev
+echo "==> Installing NVIDIA drivers (lightweight)"
+
+if lspci | grep -i nvidia >/dev/null 2>&1; then
+  echo "NVIDIA GPU detected, installing drivers"
+  
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      nvidia-driver-535 \
+      nvidia-utils-535 \
+      libnvidia-compute-535 \
+      libnvidia-ml-dev || {
+        echo "Failed to install drivers, trying alternative method"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            nvidia-utils-535 \
+            libnvidia-ml-dev || echo "NVIDIA drivers installation skipped"
+      }
+  
+  modprobe nvidia 2>/dev/null || echo "NVIDIA module not loaded yet (may require reboot)"
+  modprobe nvidia-uvm 2>/dev/null || true
+else
+  echo "No NVIDIA GPU detected, skipping driver installation"
+  apt-get install -y -qq libnvidia-ml-dev 2>/dev/null || true
+fi
 
 echo "==> Installing NVIDIA Container Toolkit"
 if [ -f "/etc/apt/sources.list.d/nvidia-container-toolkit.list" ]; then
-  rm /etc/apt/sources.list.d/nvidia-container-toolkit.list
+  rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list
 fi
 if [ -f "/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg" ]; then
-  rm /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+  rm -f /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 fi
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null || echo "GPG key installation failed"
 curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
     sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-    tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-apt-get update -qq
-apt-get install -y -qq nvidia-container-toolkit
-nvidia-ctk runtime configure --runtime=docker
+    tee /etc/apt/sources.list.d/nvidia-container-toolkit.list 2>/dev/null || echo "Repository setup failed"
+
+apt-get update -qq 2>/dev/null || true
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nvidia-container-toolkit 2>/dev/null || echo "NVIDIA Container Toolkit installation skipped"
+nvidia-ctk runtime configure --runtime=docker 2>/dev/null || true
 
 echo "==> Configuring Docker daemon with GPU support"
 
 HAS_GPU=0
 if [ -e /dev/nvidiactl ] && [ -e /dev/nvidia0 ]; then
   HAS_GPU=1
-  echo "GPU detected"
+  echo "GPU devices ready"
+elif lspci | grep -i nvidia >/dev/null 2>&1; then
+  echo "NVIDIA GPU present but drivers not loaded (reboot may be required)"
+  HAS_GPU=0
 else
-  echo "No GPU detected, skipping GPU configuration"
+  echo "No GPU detected"
 fi
 
 if [ "$HAS_KVM" -eq 1 ]; then
@@ -302,3 +325,13 @@ echo "Agent status: systemctl status qudata-agent"
 echo "Security status: systemctl status qudata-security"
 echo "Agent logs: journalctl -u qudata-agent -f"
 echo "Security logs: journalctl -u qudata-security -f"
+echo ""
+
+if lspci | grep -i nvidia >/dev/null 2>&1 && [ ! -e /dev/nvidia0 ]; then
+  echo "  IMPORTANT: NVIDIA GPU detected but drivers not loaded"
+  echo "  Please reboot the system to activate GPU drivers"
+  echo "  After reboot, verify with: nvidia-smi"
+  echo ""
+fi
+
+echo "Installation completed successfully!"

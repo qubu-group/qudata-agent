@@ -46,10 +46,16 @@ func (r *Runtime) StatsMonitoring() {
 	for {
 		if containers.InstanceIsRunning() {
 			request = &models.StatsRequest{
-				Status: containers.GetInstanceStatus(),
+				GPUUtil: utils.GetGPUUtil(),
+				CPUUtil: utils.GetCPUUtil(),
+				RAMUtil: utils.GetRAMUtil(),
+				MemUtil: utils.GetMemUtil(),
+				InetIn:  utils.GetInetIn(),
+				InetOut: utils.GetInetOut(),
+				Status:  containers.GetInstanceStatus(),
 			}
 			r.Client.Stats(request)
-			time.Sleep(500 * time.Millisecond)
 		}
+		time.Sleep(500 * time.Millisecond)
 	}
 }
