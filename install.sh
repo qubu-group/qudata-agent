@@ -301,13 +301,6 @@ echo "INSTALLATION COMPLETE"
 echo "=========================================="
 echo ""
 
-echo "Service Status:"
-systemctl status qudata-agent --no-pager -l | head -n 5 || true
-systemctl status qudata-security --no-pager -l | head -n 5 || true
-echo ""
-
-echo "Container Runtime: Docker (standard isolation)"
-
 if [ "$HAS_NVIDIA" -eq 1 ] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
   CUDA_VERSION=$(nvidia-smi --query-gpu=cuda_version --format=csv,noheader 2>/dev/null | head -n1 | tr -d ' ')
   if [ -n "$CUDA_VERSION" ]; then
@@ -317,12 +310,6 @@ if [ "$HAS_NVIDIA" -eq 1 ] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-sm
 else
   echo "GPU: Not available"
 fi
-
-echo ""
-echo "Logs:"
-echo "  Agent:    /var/log/qudata/agent.log"
-echo "  Security: /var/log/qudata/security.log"
-echo ""
 
 if [ "$HAS_NVIDIA" -eq 1 ] && ! nvidia-smi >/dev/null 2>&1; then
   echo "=========================================="
