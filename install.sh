@@ -29,7 +29,17 @@ mkdir -p $INSTALL_DIR $BIN_DIR $LOG_DIR /var/lib/qudata
 echo "==> Installing system dependencies"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq build-essential git curl gnupg ca-certificates wget libnvidia-ml-dev
+apt-get install -y -qq build-essential git curl gnupg ca-certificates wget
+
+echo "==> Installing NVIDIA ML headers"
+apt-get install -y -qq libnvidia-ml-dev || {
+    echo "Warning: libnvidia-ml-dev not available in default repos"
+    echo "Trying to find NVIDIA drivers..."
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        echo "NVIDIA drivers found, installing dev headers"
+        apt-get install -y -qq nvidia-utils-* libnvidia-compute-* 2>/dev/null || true
+    fi
+}
 
 echo "==> Installing Docker"
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
@@ -68,10 +78,24 @@ git clone https://github.com/magicaleks/qudata-agent-alpha.git
 cd qudata-agent-alpha
 
 echo "==> Building agent"
-/usr/local/go/bin/go build -tags linux -o $BIN_DIR/qudata-agent ./cmd/app
-/usr/local/go/bin/go build -tags linux -o $BIN_DIR/qudata-security ./cmd/security
+if ! /usr/local/go/bin/go build -tags linux -o $BIN_DIR/qudata-agent ./cmd/app; then
+    echo "ERROR: Failed to build qudata-agent"
+    echo "Checking NVML installation:"
+    dpkg -l | grep nvidia-ml || echo "libnvidia-ml-dev not found"
+    ls -la /usr/include/nvml.h 2>/dev/null || echo "nvml.h not found in /usr/include"
+    ls -la /usr/lib/x86_64-linux-gnu/libnvidia-ml.so* 2>/dev/null || echo "libnvidia-ml.so not found"
+    exit 1
+fi
+
+if ! /usr/local/go/bin/go build -tags linux -o $BIN_DIR/qudata-security ./cmd/security; then
+    echo "ERROR: Failed to build qudata-security"
+    exit 1
+fi
+
 chmod +x $BIN_DIR/qudata-agent
 chmod +x $BIN_DIR/qudata-security
+
+echo "Build completed successfully"
 
 echo "==> Setup environment"
 cat > /etc/qudata.env <<EOF
@@ -133,15 +157,17 @@ echo "=========================================="
 echo "INSTALLATION COMPLETE"
 echo "=========================================="
 echo ""
-echo "Services started:"
-echo "  - qudata-agent"
-echo "  - qudata-security"
-echo ""
-echo "Logs:"
-echo "  /var/log/qudata/agent.log"
-echo "  /var/log/qudata/security.log"
-echo ""
-echo "Check status:"
-echo "  systemctl status qudata-agent"
-echo "  systemctl status qudata-security"
+
+echo "GPU Detection:"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    GPU_INFO=$(nvidia-smi --query-gpu=name,driver_version,cuda_version --format=csv,noheader 2>/dev/null | head -n1)
+    if [ -n "$GPU_INFO" ]; then
+        echo "  ✓ $GPU_INFO"
+    else
+        echo "  ⚠ nvidia-smi found but GPU info unavailable"
+    fi
+else
+    echo "  ✗ nvidia-smi not found - NVIDIA drivers may not be installed"
+    echo "    Install drivers: sudo apt-get install nvidia-driver-560"
+fi
 echo ""
