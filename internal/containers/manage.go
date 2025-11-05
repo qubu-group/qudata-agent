@@ -64,7 +64,13 @@ func StartInstance(data CreateInstance) error {
 		image = data.Registry + "/" + image
 	}
 
-	args := []string{"run", "-d"}
+	args := []string{
+		"run",
+		"-d",
+		"-t",
+		"--init",
+		"--restart=unless-stopped",
+	}
 
 	if hasGPU() {
 		args = append(args, "--gpus=all")
@@ -89,9 +95,9 @@ func StartInstance(data CreateInstance) error {
 	args = append(args, image)
 
 	if data.Command != "" {
-		args = append(args, "sh", "-c", data.Command)
+		args = append(args, "sh", "-c", "trap 'exit 0' SIGTERM; "+data.Command+" & wait")
 	} else {
-		args = append(args, "sleep", "infinity")
+		args = append(args, "tail", "-f", "/dev/null")
 	}
 
 	cmd := exec.Command("docker", args...)
