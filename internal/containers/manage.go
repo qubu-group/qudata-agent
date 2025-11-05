@@ -138,11 +138,19 @@ func StartInstance(data CreateInstance) error {
 
 	if hasGPU() {
 		if runtime == "kata" {
-			args = append(args, "--gpus=all")
+			gpuDevice, err := utils.GetGPUVFIODevice()
+			if err == nil && gpuDevice != nil {
+				args = append(args, "--device", gpuDevice.VFIODevice)
+				utils.LogInfo("using VFIO GPU passthrough: %s (IOMMU group: %s)", gpuDevice.VFIODevice, gpuDevice.IOMMUGroup)
+			} else {
+				utils.LogWarn("VFIO GPU not available for Kata: %v", err)
+			}
 		} else if runtime == "runsc" {
 			args = append(args, "--gpus=all")
 			args = append(args, "-e", "NVIDIA_VISIBLE_DEVICES=all")
 			args = append(args, "-e", "NVIDIA_DRIVER_CAPABILITIES=compute,utility")
+		} else {
+			args = append(args, "--gpus=all")
 		}
 	}
 

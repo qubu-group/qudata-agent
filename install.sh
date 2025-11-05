@@ -147,10 +147,12 @@ if [ "$HAS_KVM" -eq 1 ]; then
 
   mkdir -p /etc/kata-containers
   cp /opt/kata/share/defaults/kata-containers/configuration-qemu.toml /etc/kata-containers/configuration.toml || true
-  # Ensure kernel/initrd/image paths are set
   sed -i 's|^#\?kernel = .*|kernel = "/opt/kata/share/kata-containers/vmlinuz.container"|' /etc/kata-containers/configuration.toml
   sed -i 's|^#\?image = .*|image = "/opt/kata/share/kata-containers/kata-containers.img"|' /etc/kata-containers/configuration.toml
   sed -i 's|^#\?initrd = .*|initrd = "/opt/kata/share/kata-containers/kata-containers-initrd.img"|' /etc/kata-containers/configuration.toml
+  sed -i 's|^#\?machine_type = .*|machine_type = "q35"|' /etc/kata-containers/configuration.toml
+  sed -i 's|^#\?hotplug_vfio_on_root_bus = .*|hotplug_vfio_on_root_bus = true|' /etc/kata-containers/configuration.toml
+  sed -i 's|^#\?pcie_root_port = .*|pcie_root_port = 1|' /etc/kata-containers/configuration.toml
 
   echo "==> Configuring containerd for Kata (shim v2)"
   if [ ! -f /etc/containerd/config.toml ]; then
@@ -196,6 +198,146 @@ EOC
   }
 }
 EOCNI
+
+  echo "==> Configuring VFIO for GPU passthrough (Kata Containers)"
+  
+  modprobe vfio 2>/dev/null || true
+  modprobe vfio-pci 2>/dev/null || true
+  modprobe vfio_iommu_type1 2>/dev/null || true
+  
+  if [ ! -d /sys/kernel/iommu_groups ] || [ -z "$(ls -A /sys/kernel/iommu_groups 2>/dev/null)" ]; then
+    echo "WARNING: IOMMU not enabled. GPU passthrough for Kata will not work."
+    echo "To enable IOMMU:"
+    echo "  1. For Intel CPU: add 'intel_iommu=on iommu=pt' to GRUB_CMDLINE_LINUX in /etc/default/grub"
+    echo "  2. For AMD CPU: add 'amd_iommu=on iommu=pt' to GRUB_CMDLINE_LINUX in /etc/default/grub"
+    echo "  3. Run: update-grub && reboot"
+    echo ""
+    echo "Checking CPU vendor..."
+    if grep -q "Intel" /proc/cpuinfo; then
+      IOMMU_PARAM="intel_iommu=on iommu=pt"
+    elif grep -q "AMD" /proc/cpuinfo; then
+      IOMMU_PARAM="amd_iommu=on iommu=pt"
+    else
+      IOMMU_PARAM="iommu=pt"
+    fi
+    
+    if [ -f /etc/default/grub ]; then
+      if ! grep -q "$IOMMU_PARAM" /etc/default/grub; then
+        echo "Adding IOMMU parameters to GRUB..."
+        sed -i.bak "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"$IOMMU_PARAM /" /etc/default/grub
+        update-grub 2>/dev/null || grub-mkconfig -o /boot/grub/grub.cfg 2>/dev/null || true
+        echo "IOMMU parameters added. System reboot required for changes to take effect."
+      fi
+    fi
+  else
+    echo "IOMMU is enabled"
+    
+    GPU_PCI=$(lspci -D -nn | grep -i "nvidia" | grep -iE "vga|3d" | head -n1 | awk '{print $1}')
+    if [ -n "$GPU_PCI" ]; then
+      echo "Found NVIDIA GPU at PCI address: $GPU_PCI"
+      
+      GPU_INFO=$(lspci -nn -s $GPU_PCI | grep -oP '\[\K[0-9a-f]{4}:[0-9a-f]{4}' || echo "")
+      if [ -n "$GPU_INFO" ]; then
+        VENDOR_ID=$(echo $GPU_INFO | cut -d: -f1)
+        DEVICE_ID=$(echo $GPU_INFO | cut -d: -f2)
+        echo "GPU IDs: $VENDOR_ID:$DEVICE_ID"
+      fi
+      
+      IOMMU_GROUP=$(basename $(readlink /sys/bus/pci/devices/$GPU_PCI/iommu_group 2>/dev/null) 2>/dev/null)
+      if [ -n "$IOMMU_GROUP" ]; then
+        echo "GPU is in IOMMU group: $IOMMU_GROUP"
+        
+        DRIVER_PATH="/sys/bus/pci/devices/$GPU_PCI/driver"
+        if [ -L "$DRIVER_PATH" ]; then
+          CURRENT_DRIVER=$(basename $(readlink $DRIVER_PATH))
+          echo "GPU currently bound to driver: $CURRENT_DRIVER"
+          
+          if [ "$CURRENT_DRIVER" != "vfio-pci" ]; then
+            echo ""
+            echo "=========================================="
+            echo "GPU VFIO PASSTHROUGH SETUP"
+            echo "=========================================="
+            echo "For Kata Containers GPU support, the GPU needs to be bound to vfio-pci."
+            echo ""
+            echo "WARNING: After binding to vfio-pci:"
+            echo "  - GPU will NOT be usable by the host system"
+            echo "  - Only Kata containers will have access to GPU"
+            echo "  - You can use bind_gpu_to_vfio.sh later to bind it manually"
+            echo ""
+            echo "Current status:"
+            echo "  - GPU: $GPU_PCI"
+            echo "  - Current driver: $CURRENT_DRIVER"
+            echo "  - Target driver: vfio-pci"
+            echo ""
+            
+            if [ "${AUTO_BIND_GPU:-}" = "yes" ]; then
+              BIND_RESPONSE="y"
+              echo "AUTO_BIND_GPU=yes detected, binding automatically..."
+            else
+              echo -n "Do you want to bind GPU to vfio-pci now? (y/N): "
+              read BIND_RESPONSE
+            fi
+            
+            if [ "$BIND_RESPONSE" = "y" ] || [ "$BIND_RESPONSE" = "Y" ]; then
+              echo ""
+              echo "==> Binding GPU to vfio-pci"
+              
+              echo "Stopping services..."
+              systemctl stop docker 2>/dev/null || true
+              
+              echo "Unloading NVIDIA modules..."
+              rmmod nvidia_drm 2>/dev/null || true
+              rmmod nvidia_modeset 2>/dev/null || true
+              rmmod nvidia_uvm 2>/dev/null || true
+              rmmod nvidia 2>/dev/null || true
+              
+              echo "Unbinding GPU from $CURRENT_DRIVER..."
+              echo "$GPU_PCI" > /sys/bus/pci/devices/$GPU_PCI/driver/unbind 2>/dev/null || true
+              
+              if [ -n "$VENDOR_ID" ] && [ -n "$DEVICE_ID" ]; then
+                echo "Binding GPU to vfio-pci..."
+                echo "$VENDOR_ID $DEVICE_ID" > /sys/bus/pci/drivers/vfio-pci/new_id 2>/dev/null || true
+                sleep 1
+                
+                if [ -L "/sys/bus/pci/devices/$GPU_PCI/driver" ] && [ "$(basename $(readlink /sys/bus/pci/devices/$GPU_PCI/driver))" = "vfio-pci" ]; then
+                  echo "SUCCESS: GPU bound to vfio-pci"
+                  echo "VFIO device: /dev/vfio/$IOMMU_GROUP"
+                  
+                  echo "Making changes persistent..."
+                  cat > /etc/modprobe.d/vfio-gpu.conf <<EOVFIO
+softdep nvidia pre: vfio-pci
+options vfio-pci ids=$VENDOR_ID:$DEVICE_ID
+EOVFIO
+                  
+                  cat > /etc/modules-load.d/vfio.conf <<EOVFIO
+vfio
+vfio-pci
+vfio_iommu_type1
+EOVFIO
+                  
+                  echo "Configuration saved"
+                else
+                  echo "WARNING: Failed to bind GPU to vfio-pci"
+                  echo "You can try manually using bind_gpu_to_vfio.sh"
+                fi
+              else
+                echo "ERROR: Could not determine GPU vendor/device IDs"
+              fi
+              
+              echo "Restarting Docker..."
+              systemctl start docker 2>/dev/null || true
+            else
+              echo "Skipping GPU binding. You can bind it later using:"
+              echo "  sudo bash bind_gpu_to_vfio.sh"
+            fi
+          else
+            echo "GPU is already bound to vfio-pci"
+            echo "VFIO device: /dev/vfio/$IOMMU_GROUP"
+          fi
+        fi
+      fi
+    fi
+  fi
 
   echo "==> Configuring Docker (keep runc default; add NVIDIA runtime if present)"
   mkdir -p /etc/docker
@@ -432,17 +574,99 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 echo ""
-echo "==> Installation complete"
+echo "=========================================="
+echo "INSTALLATION COMPLETE"
+echo "=========================================="
+echo ""
+
+echo "Service Status:"
+systemctl status qudata-agent --no-pager -l | head -n 5 || true
+systemctl status qudata-security --no-pager -l | head -n 5 || true
+echo ""
+
+if [ "${HAS_KVM:-0}" -eq 1 ]; then
+  echo "Container Runtime: Kata Containers (KVM-based isolation)"
+  
+  if [ -d /sys/kernel/iommu_groups ] && [ -n "$(ls -A /sys/kernel/iommu_groups 2>/dev/null)" ]; then
+    echo "IOMMU Status: Enabled"
+    
+    GPU_PCI=$(lspci -D -nn | grep -i "nvidia" | grep -iE "vga|3d" | head -n1 | awk '{print $1}')
+    if [ -n "$GPU_PCI" ]; then
+      DRIVER_PATH="/sys/bus/pci/devices/$GPU_PCI/driver"
+      if [ -L "$DRIVER_PATH" ]; then
+        CURRENT_DRIVER=$(basename $(readlink $DRIVER_PATH))
+        if [ "$CURRENT_DRIVER" = "vfio-pci" ]; then
+          IOMMU_GROUP=$(basename $(readlink /sys/bus/pci/devices/$GPU_PCI/iommu_group 2>/dev/null) 2>/dev/null)
+          echo "GPU Status: Bound to vfio-pci (VFIO device: /dev/vfio/$IOMMU_GROUP)"
+          echo "GPU Mode: Passthrough for Kata Containers (host cannot use GPU)"
+        else
+          echo "GPU Status: Bound to $CURRENT_DRIVER"
+          echo "GPU Mode: Available for host (not configured for Kata passthrough)"
+          echo ""
+          echo "To enable GPU passthrough for Kata:"
+          echo "  sudo bash bind_gpu_to_vfio.sh"
+        fi
+      fi
+    fi
+  else
+    echo "IOMMU Status: Disabled"
+    echo "GPU passthrough: Not available (IOMMU required)"
+    echo ""
+    echo "To enable IOMMU, edit /etc/default/grub and add:"
+    if grep -q "Intel" /proc/cpuinfo; then
+      echo "  GRUB_CMDLINE_LINUX=\"intel_iommu=on iommu=pt\""
+    elif grep -q "AMD" /proc/cpuinfo; then
+      echo "  GRUB_CMDLINE_LINUX=\"amd_iommu=on iommu=pt\""
+    fi
+    echo "Then run: sudo update-grub && sudo reboot"
+  fi
+else
+  echo "Container Runtime: gVisor (runsc) - lightweight isolation"
+  
+  if [ "${HAS_GPU:-0}" -eq 1 ]; then
+    echo "GPU Mode: nvproxy enabled (shared access, secure isolation)"
+  else
+    echo "GPU Mode: No GPU detected"
+  fi
+fi
+
+echo ""
+echo "Logs:"
+echo "  Agent:    /var/log/qudata/agent.log"
+echo "  Security: /var/log/qudata/security.log"
 echo ""
 
 if [ "$HAS_NVIDIA" -eq 1 ] && ! nvidia-smi >/dev/null 2>&1; then
-  echo "NOTE: NVIDIA GPU detected but drivers not loaded"
-  echo "      Reboot required: sudo reboot"
+  echo "=========================================="
+  echo "REBOOT REQUIRED"
+  echo "=========================================="
+  echo "NVIDIA GPU detected but drivers not loaded."
+  echo "Please reboot the system: sudo reboot"
   echo ""
+  
+  if [ -f /etc/modprobe.d/vfio-gpu.conf ]; then
+    echo "After reboot, GPU will be bound to vfio-pci for Kata Containers."
+    echo "To enable nvidia-cdi-refresh.service (if needed):"
+    echo "  sudo systemctl enable nvidia-cdi-refresh.service"
+    echo "  sudo systemctl start nvidia-cdi-refresh.service"
+  fi
+  echo "=========================================="
+elif [ -d /sys/kernel/iommu_groups ] && [ -z "$(ls -A /sys/kernel/iommu_groups 2>/dev/null)" ]; then
+  echo "=========================================="
+  echo "REBOOT REQUIRED"
+  echo "=========================================="
+  echo "IOMMU parameters were added to GRUB."
+  echo "Please reboot to enable IOMMU: sudo reboot"
+  echo ""
+  echo "After reboot, you can bind GPU to VFIO:"
+  echo "  sudo bash bind_gpu_to_vfio.sh"
+  echo "=========================================="
 fi
 
 if [ "$ERRORS" -gt 0 ]; then
+  echo ""
   echo "Warning: Installation completed with $ERRORS warnings"
+  echo "Check the logs above for details."
   exit 0
 fi
 
