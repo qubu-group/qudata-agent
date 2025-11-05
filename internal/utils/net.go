@@ -2,7 +2,11 @@ package utils
 
 import (
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"strings"
+	"time"
 )
 
 func GetFreePort() int {
@@ -48,18 +52,33 @@ func GetPortsRange(r int) (int, int) {
 }
 
 func GetPublicIP() string {
-	conn, err := net.Dial("udp", "8.8.8.8:53")
-	if err != nil {
-		LogWarn("failed to get public IP: %v", err)
-		return "127.0.0.1"
+	services := []string{
+		"https://api.ipify.org",
+		"https://icanhazip.com",
+		"https://ifconfig.me",
 	}
-	defer conn.Close()
 
-	localAddr := conn.LocalAddr()
-	udpAddr, ok := localAddr.(*net.UDPAddr)
-	if !ok {
-		LogWarn("failed to cast to UDPAddr")
-		return "127.0.0.1"
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	for _, service := range services {
+		resp, err := client.Get(service)
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				continue
+			}
+			ip := strings.TrimSpace(string(body))
+			if ip != "" && net.ParseIP(ip) != nil {
+				return ip
+			}
+		}
 	}
-	return udpAddr.IP.String()
+
+	LogWarn("failed to get public IP from all services")
+	return "127.0.0.1"
 }
