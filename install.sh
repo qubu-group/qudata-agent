@@ -29,7 +29,7 @@ mkdir -p $INSTALL_DIR $BIN_DIR $LOG_DIR /var/lib/qudata
 echo "==> Installing system dependencies"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq build-essential git curl gnupg ca-certificates wget
+apt-get install -y -qq build-essential git curl gnupg ca-certificates wget libnvidia-ml-dev
 
 echo "==> Installing Docker"
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
