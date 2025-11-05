@@ -11,7 +11,10 @@ double get_gpu_vram();
 double get_max_cuda_version();
 */
 import "C"
-import "math"
+import (
+	"math"
+	"strings"
+)
 
 func GetGPUCount() int {
 	return int(math.Max(float64(C.get_gpu_count()), 1))
@@ -22,7 +25,18 @@ func GetGPUName() string {
 	if C.get_gpu_name(&name[0], C.uint(len(name))) == 0 {
 		return ""
 	}
-	return C.GoString(&name[0])
+	fullName := C.GoString(&name[0])
+	return formatGPUName(fullName)
+}
+
+func formatGPUName(fullName string) string {
+	result := fullName
+	result = strings.ReplaceAll(result, "NVIDIA ", "")
+	result = strings.ReplaceAll(result, "GeForce ", "")
+	result = strings.ReplaceAll(result, "Tesla ", "")
+	result = strings.ReplaceAll(result, " Ti", "Ti")
+	result = strings.ReplaceAll(result, " ", "")
+	return result
 }
 
 func GetVRAM() float64 {
