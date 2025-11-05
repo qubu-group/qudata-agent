@@ -31,12 +31,43 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq build-essential git curl gnupg ca-certificates wget
 
+echo "==> Checking NVIDIA driver status"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    if ! nvidia-smi >/dev/null 2>&1; then
+        ERROR_OUTPUT=$(nvidia-smi 2>&1 || true)
+        if echo "$ERROR_OUTPUT" | grep -q "Driver/library version mismatch"; then
+            echo "⚠ Driver/library version mismatch detected - fixing"
+            
+            systemctl stop docker 2>/dev/null || true
+            
+            rmmod nvidia_drm 2>/dev/null || true
+            rmmod nvidia_modeset 2>/dev/null || true
+            rmmod nvidia_uvm 2>/dev/null || true
+            rmmod nvidia 2>/dev/null || true
+            
+            DRIVER_PKG=$(dpkg -l | grep -E "^ii.*nvidia-driver-[0-9]+" | awk '{print $2}' | head -n1)
+            if [ -n "$DRIVER_PKG" ]; then
+                echo "Reinstalling $DRIVER_PKG"
+                apt-get install --reinstall -y -qq $DRIVER_PKG 2>/dev/null || true
+            fi
+            
+            modprobe nvidia 2>/dev/null || true
+            
+            if ! nvidia-smi >/dev/null 2>&1; then
+                echo "⚠ Reboot required to fix driver mismatch"
+                echo "Run: sudo reboot"
+                exit 1
+            fi
+        fi
+    fi
+    echo "✓ NVIDIA drivers OK"
+else
+    echo "⚠ nvidia-smi not found - install: apt-get install nvidia-driver-560"
+fi
+
 echo "==> Installing NVIDIA ML headers"
 apt-get install -y -qq libnvidia-ml-dev || {
-    echo "Warning: libnvidia-ml-dev not available in default repos"
-    echo "Trying to find NVIDIA drivers..."
     if command -v nvidia-smi >/dev/null 2>&1; then
-        echo "NVIDIA drivers found, installing dev headers"
         apt-get install -y -qq nvidia-utils-* libnvidia-compute-* 2>/dev/null || true
     fi
 }
