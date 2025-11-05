@@ -128,39 +128,66 @@ apt-get install -y -qq docker-ce docker-ce-cli containerd.io
 systemctl enable docker
 systemctl start docker
 
-echo "==> Installing NVIDIA drivers"
-if [ "$HAS_NVIDIA" -eq 1 ] && ! command -v nvidia-smi >/dev/null 2>&1; then
-  echo "Installing latest NVIDIA driver (CUDA 12.6+ support)"
+echo "==> Checking NVIDIA drivers"
+NEED_DRIVER_INSTALL=0
+NEED_DRIVER_UPGRADE=0
+
+if [ "$HAS_NVIDIA" -eq 1 ]; then
+  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+    CURRENT_CUDA=$(nvidia-smi --query-gpu=cuda_version --format=csv,noheader 2>/dev/null | head -n1 | tr -d ' ')
+    CURRENT_DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | tr -d ' ')
+    
+    if [ -n "$CURRENT_CUDA" ]; then
+      CUDA_MAJOR=$(echo $CURRENT_CUDA | cut -d. -f1)
+      CUDA_MINOR=$(echo $CURRENT_CUDA | cut -d. -f2)
+      
+      echo "Current driver: $CURRENT_DRIVER (CUDA $CURRENT_CUDA)"
+      
+      if [ "$CUDA_MAJOR" -lt 12 ] || ([ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -lt 6 ]); then
+        echo "⚠ Driver is outdated (CUDA $CURRENT_CUDA < 12.6)"
+        echo "Upgrading to nvidia-driver-560 for CUDA 12.6+ support"
+        NEED_DRIVER_UPGRADE=1
+        
+        systemctl stop docker 2>/dev/null || true
+        
+        rmmod nvidia_drm 2>/dev/null || true
+        rmmod nvidia_modeset 2>/dev/null || true
+        rmmod nvidia_uvm 2>/dev/null || true
+        rmmod nvidia 2>/dev/null || true
+      else
+        echo "✓ Driver supports CUDA 12.6+ (current: $CURRENT_CUDA)"
+      fi
+    fi
+  else
+    echo "NVIDIA driver not found or not working"
+    NEED_DRIVER_INSTALL=1
+  fi
+fi
+
+if [ "$NEED_DRIVER_INSTALL" -eq 1 ] || [ "$NEED_DRIVER_UPGRADE" -eq 1 ]; then
+  echo "==> Installing NVIDIA driver 560 (CUDA 12.6+ support)"
   
   if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     nvidia-driver-560 \
     nvidia-utils-560 \
     libnvidia-compute-560 \
     libnvidia-ml-dev 2>/dev/null; then
-    echo "NVIDIA driver 560 installed successfully (supports CUDA 12.6+)"
+    echo "✓ nvidia-driver-560 installed successfully"
     modprobe nvidia 2>/dev/null || echo "Module load will require reboot"
   elif DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     nvidia-driver-550 \
     nvidia-utils-550 \
     libnvidia-compute-550 \
     libnvidia-ml-dev; then
-    echo "NVIDIA driver 550 installed (supports CUDA up to 12.5)"
-    echo "Note: For CUDA 12.6+ containers, upgrade to nvidia-driver-560"
-    modprobe nvidia 2>/dev/null || echo "Module load will require reboot"
-  elif DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    nvidia-driver-535 \
-    nvidia-utils-535 \
-    libnvidia-compute-535 \
-    libnvidia-ml-dev; then
-    echo "WARNING: nvidia-driver-535 installed (supports CUDA up to 12.2)"
-    echo "For modern containers (CUDA 12.6+), you need nvidia-driver-560 or newer"
-    echo "To upgrade after reboot: sudo apt-get install nvidia-driver-560"
+    echo "⚠ nvidia-driver-550 installed (CUDA 12.5 max)"
+    echo "WARNING: CUDA 12.6+ containers will NOT work"
     modprobe nvidia 2>/dev/null || echo "Module load will require reboot"
   else
-    echo "Warning: NVIDIA driver installation failed, continuing..."
+    echo "ERROR: Failed to install NVIDIA driver"
+    echo "Manual installation required: sudo apt-get install nvidia-driver-560"
   fi
-else
-  echo "Installing development headers only"
+elif [ "$HAS_NVIDIA" -eq 1 ]; then
+  echo "Installing development headers"
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libnvidia-ml-dev 2>/dev/null || true
 fi
 
