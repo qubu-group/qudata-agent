@@ -70,10 +70,7 @@ func StartInstance(data CreateInstance) error {
 		"-t",
 		"--init",
 		"--restart=unless-stopped",
-	}
-
-	if hasGPU() {
-		args = append(args, "--gpus=all")
+		"--gpus=all",
 	}
 
 	if data.CPUs != "" {

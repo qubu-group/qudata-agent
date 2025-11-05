@@ -24,7 +24,9 @@ func GetInstanceStatus() InstanceStatus {
 	cmd := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", currentContainerID)
 	output, err := cmd.Output()
 	if err != nil {
-		return ErrorStatus
+		currentContainerID = ""
+		allocatedPorts = nil
+		return DestroyedStatus
 	}
 
 	status := strings.TrimSpace(string(output))
@@ -36,11 +38,10 @@ func GetInstanceStatus() InstanceStatus {
 	case "restarting":
 		return RebootingStatus
 	case "exited", "dead":
-		if currentContainerID == "" {
-			return DestroyedStatus
-		} else {
-			return PausedStatus
-		}
+		exec.Command("docker", "rm", "-f", currentContainerID).Run()
+		currentContainerID = ""
+		allocatedPorts = nil
+		return ErrorStatus
 	case "created":
 		return PendingStatus
 	default:
