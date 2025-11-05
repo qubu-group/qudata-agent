@@ -376,14 +376,22 @@ fi
 
 echo "==> Installing NVIDIA drivers"
 if [ "$HAS_NVIDIA" -eq 1 ] && ! command -v nvidia-smi >/dev/null 2>&1; then
-  echo "Installing NVIDIA driver 535"
+  echo "Installing NVIDIA driver 550 (CUDA 12.4+ support)"
   
   if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    nvidia-driver-550 \
+    nvidia-utils-550 \
+    libnvidia-compute-550 \
+    libnvidia-ml-dev; then
+    echo "NVIDIA driver 550 installed successfully (supports CUDA up to 12.4)"
+    modprobe nvidia 2>/dev/null || echo "Module load will require reboot"
+  elif DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     nvidia-driver-535 \
     nvidia-utils-535 \
     libnvidia-compute-535 \
     libnvidia-ml-dev; then
-    echo "NVIDIA driver installed successfully"
+    echo "WARNING: Installed nvidia-driver-535 (supports CUDA up to 12.2)"
+    echo "For CUDA 12.6+ containers, you need nvidia-driver-550 or newer"
     modprobe nvidia 2>/dev/null || echo "Module load will require reboot"
   else
     echo "Warning: NVIDIA driver installation failed, continuing..."
@@ -631,6 +639,27 @@ else
 fi
 
 echo ""
+
+if [ "$HAS_NVIDIA" -eq 1 ] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+  CUDA_VERSION=$(nvidia-smi --query-gpu=cuda_version --format=csv,noheader 2>/dev/null | head -n1 | tr -d ' ')
+  if [ -n "$CUDA_VERSION" ]; then
+    CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1)
+    CUDA_MINOR=$(echo $CUDA_VERSION | cut -d. -f2)
+    
+    echo "CUDA Version: $CUDA_VERSION"
+    
+    if [ "$CUDA_MAJOR" -lt 12 ] || ([ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -lt 6 ]); then
+      echo "⚠ WARNING: Your CUDA version is $CUDA_VERSION"
+      echo "  Modern containers may require CUDA 12.6+"
+      echo "  Consider upgrading: sudo apt-get install nvidia-driver-550"
+      echo "  Check compatibility: bash check_cuda_version.sh"
+    else
+      echo "✓ CUDA $CUDA_VERSION supports modern containers"
+    fi
+    echo ""
+  fi
+fi
+
 echo "Logs:"
 echo "  Agent:    /var/log/qudata/agent.log"
 echo "  Security: /var/log/qudata/security.log"
