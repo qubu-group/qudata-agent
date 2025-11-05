@@ -133,33 +133,41 @@ NEED_DRIVER_INSTALL=0
 NEED_DRIVER_UPGRADE=0
 
 if [ "$HAS_NVIDIA" -eq 1 ]; then
-  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
-    CURRENT_CUDA=$(nvidia-smi --query-gpu=cuda_version --format=csv,noheader 2>/dev/null | head -n1 | tr -d ' ')
-    CURRENT_DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | tr -d ' ')
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    CURRENT_CUDA=$(nvidia-smi --query-gpu=cuda_version --format=csv,noheader 2>/dev/null | head -n1 | tr -d ' ' || echo "")
+    CURRENT_DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | tr -d ' ' || echo "")
     
-    if [ -n "$CURRENT_CUDA" ]; then
-      CUDA_MAJOR=$(echo $CURRENT_CUDA | cut -d. -f1)
-      CUDA_MINOR=$(echo $CURRENT_CUDA | cut -d. -f2)
+    if [ -n "$CURRENT_CUDA" ] && [ -n "$CURRENT_DRIVER" ]; then
+      CUDA_MAJOR=$(echo "$CURRENT_CUDA" | cut -d. -f1 || echo "0")
+      CUDA_MINOR=$(echo "$CURRENT_CUDA" | cut -d. -f2 || echo "0")
       
-      echo "Current driver: $CURRENT_DRIVER (CUDA $CURRENT_CUDA)"
-      
-      if [ "$CUDA_MAJOR" -lt 12 ] || ([ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -lt 6 ]); then
-        echo "⚠ Driver is outdated (CUDA $CURRENT_CUDA < 12.6)"
-        echo "Upgrading to nvidia-driver-560 for CUDA 12.6+ support"
-        NEED_DRIVER_UPGRADE=1
+      if [ -n "$CUDA_MAJOR" ] && [ -n "$CUDA_MINOR" ] && [ "$CUDA_MAJOR" -ge 1 ]; then
+        echo "Current driver: $CURRENT_DRIVER (CUDA $CURRENT_CUDA)"
         
-        systemctl stop docker 2>/dev/null || true
-        
-        rmmod nvidia_drm 2>/dev/null || true
-        rmmod nvidia_modeset 2>/dev/null || true
-        rmmod nvidia_uvm 2>/dev/null || true
-        rmmod nvidia 2>/dev/null || true
+        if [ "$CUDA_MAJOR" -lt 12 ] || ([ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -lt 6 ]); then
+          echo "⚠ Driver is outdated (CUDA $CURRENT_CUDA < 12.6)"
+          echo "Upgrading to nvidia-driver-560 for CUDA 12.6+ support"
+          NEED_DRIVER_UPGRADE=1
+          
+          systemctl stop docker 2>/dev/null || true
+          
+          rmmod nvidia_drm 2>/dev/null || true
+          rmmod nvidia_modeset 2>/dev/null || true
+          rmmod nvidia_uvm 2>/dev/null || true
+          rmmod nvidia 2>/dev/null || true
+        else
+          echo "✓ Driver supports CUDA 12.6+ (current: $CURRENT_CUDA)"
+        fi
       else
-        echo "✓ Driver supports CUDA 12.6+ (current: $CURRENT_CUDA)"
+        echo "NVIDIA driver found but version detection failed"
+        NEED_DRIVER_INSTALL=1
       fi
+    else
+      echo "NVIDIA driver not working properly"
+      NEED_DRIVER_INSTALL=1
     fi
   else
-    echo "NVIDIA driver not found or not working"
+    echo "NVIDIA driver not found"
     NEED_DRIVER_INSTALL=1
   fi
 fi
