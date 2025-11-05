@@ -170,6 +170,33 @@ EOC
   tar -xzf /tmp/nerdctl.tgz -C /usr/local/bin nerdctl
   rm /tmp/nerdctl.tgz
 
+  echo "==> Installing CNI plugins for nerdctl"
+  CNI_VERSION="1.3.0"
+  mkdir -p /opt/cni/bin
+  curl -fsSL https://github.com/containernetworking/plugins/releases/download/v${CNI_VERSION}/cni-plugins-linux-amd64-v${CNI_VERSION}.tgz -o /tmp/cni-plugins.tgz
+  tar -xzf /tmp/cni-plugins.tgz -C /opt/cni/bin
+  rm /tmp/cni-plugins.tgz
+
+  echo "==> Configuring CNI network"
+  mkdir -p /etc/cni/net.d
+  cat >/etc/cni/net.d/10-bridge.conf <<'EOCNI'
+{
+  "cniVersion": "1.0.0",
+  "name": "bridge",
+  "type": "bridge",
+  "bridge": "cni0",
+  "isGateway": true,
+  "ipMasq": true,
+  "ipam": {
+    "type": "host-local",
+    "subnet": "10.88.0.0/16",
+    "routes": [
+      { "dst": "0.0.0.0/0" }
+    ]
+  }
+}
+EOCNI
+
   echo "==> Configuring Docker (keep runc default; add NVIDIA runtime if present)"
   mkdir -p /etc/docker
   cat >/etc/docker/daemon.json <<'EOF'
