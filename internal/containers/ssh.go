@@ -18,10 +18,9 @@ func InitSSH() error {
 		{"/usr/sbin/sshd"},
 	}
 
-	containerCmd := getContainerCmd()
 	for _, cmdArgs := range commands {
 		args := append([]string{"exec", currentContainerID}, cmdArgs...)
-		if err := exec.Command(containerCmd, args...).Run(); err != nil {
+		if err := exec.Command("docker", args...).Run(); err != nil {
 			return errors.SSHInitError{Err: err}
 		}
 	}
@@ -41,10 +40,9 @@ func AddSSH(key string) error {
 		{"chmod", "700", "/root/.ssh"},
 	}
 
-	containerCmd := getContainerCmd()
 	for _, cmdArgs := range commands {
 		args := append([]string{"exec", currentContainerID}, cmdArgs...)
-		if err := exec.Command(containerCmd, args...).Run(); err != nil {
+		if err := exec.Command("docker", args...).Run(); err != nil {
 			return errors.SSHKeyAddError{Err: err}
 		}
 	}
@@ -57,9 +55,8 @@ func RemoveSSH(key string) error {
 		return errors.NoInstanceRunningError{}
 	}
 
-	containerCmd := getContainerCmd()
 	args := []string{"exec", currentContainerID, "sed", "-i", "/" + key + "/d", "/root/.ssh/authorized_keys"}
-	if err := exec.Command(containerCmd, args...).Run(); err != nil {
+	if err := exec.Command("docker", args...).Run(); err != nil {
 		return errors.SSHKeyRemoveError{Err: err}
 	}
 

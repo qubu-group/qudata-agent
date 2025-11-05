@@ -21,8 +21,7 @@ func GetInstanceStatus() InstanceStatus {
 		return DestroyedStatus
 	}
 
-	containerCmd := getContainerCmd()
-	cmd := exec.Command(containerCmd, "inspect", "-f", "{{.State.Status}}", currentContainerID)
+	cmd := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", currentContainerID)
 	output, err := cmd.Output()
 	if err != nil {
 		return ErrorStatus

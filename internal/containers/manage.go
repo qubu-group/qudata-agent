@@ -3,7 +3,6 @@ package containers
 import (
 	"fmt"
 	"github.com/magicaleks/qudata-agent-alpha/internal/errors"
-	"github.com/magicaleks/qudata-agent-alpha/internal/security"
 	"github.com/magicaleks/qudata-agent-alpha/internal/utils"
 	"os"
 	"os/exec"
@@ -13,7 +12,6 @@ import (
 var (
 	currentContainerID string
 	allocatedPorts     map[string]string
-	detectedRuntime    string
 )
 
 type CreateInstance struct {
@@ -38,11 +36,6 @@ const (
 	RebootCommand InstanceCommand = "reboot"
 )
 
-func init() {
-	detectedRuntime = detectRuntime()
-	utils.LogInfo(fmt.Sprintf("Detected container runtime: %s", detectedRuntime))
-}
-
 func hasGPU() bool {
 	if _, err := os.Stat("/dev/nvidiactl"); err == nil {
 		if _, err := os.Stat("/dev/nvidia0"); err == nil {
@@ -52,106 +45,30 @@ func hasGPU() bool {
 	return false
 }
 
-func detectRuntime() string {
-	if _, err := os.Stat("/dev/kvm"); err == nil {
-		if exec.Command("kata-runtime", "--version").Run() == nil {
-			return "kata"
-		}
-	}
-
-	if exec.Command("runsc", "--version").Run() == nil {
-		return "runsc"
-	}
-
-	return "runc"
-}
-
-func GetRuntime() string {
-	return detectedRuntime
-}
-
-func usesLUKS() bool {
-	return detectedRuntime == "kata"
-}
-
-func getContainerCmd() string {
-	if detectedRuntime == "kata" {
-		return "nerdctl"
-	}
-	return "docker"
-}
-
 func StartInstance(data CreateInstance) error {
 	if currentContainerID != "" {
 		return errors.InstanceAlreadyRunningError{}
 	}
 
-	mountPoint := "/var/lib/qudata/secure"
-
-	if usesLUKS() {
-		if security.IsActive() {
-			security.DeleteVolume()
-		}
-
-		key := security.CreateVolume(security.VolumeConfig{
-			MountPoint: mountPoint,
-			SizeMB:     data.VolumeSize,
-		})
-		if key == "" {
-			utils.LogError("Failed to create volume with runtime: %s", GetRuntime())
-			return errors.LUKSVolumeCreateError{}
-		}
-
-		exec.Command("chmod", "755", mountPoint).Run()
-	} else {
-		os.MkdirAll(mountPoint, 0755)
-	}
+	mountPoint := "/var/lib/qudata/data"
+	os.MkdirAll(mountPoint, 0755)
 
 	image := data.Image
 
 	if data.Registry != "" {
 		if data.Login != "" && data.Password != "" {
-			containerCmd := getContainerCmd()
-			loginCmd := exec.Command(containerCmd, "login", data.Registry, "-u", data.Login, "-p", data.Password)
+			loginCmd := exec.Command("docker", "login", data.Registry, "-u", data.Login, "-p", data.Password)
 			if err := loginCmd.Run(); err != nil {
-				if usesLUKS() {
-					security.DeleteVolume()
-				}
 				return errors.InstanceStartError{Err: err}
 			}
 		}
 		image = data.Registry + "/" + image
 	}
 
-	runtime := detectedRuntime
-	containerCmd := getContainerCmd()
-	var args []string
-
-	if runtime == "kata" {
-		args = []string{"run", "-d", "--runtime=io.containerd.kata.v2"}
-	} else {
-		args = []string{"run", "-d"}
-		if runtime == "runsc" {
-			args = append(args, "--runtime="+runtime)
-		}
-	}
+	args := []string{"run", "-d"}
 
 	if hasGPU() {
-		if runtime == "kata" {
-			gpuDevice, err := utils.GetGPUVFIODevice()
-			if err == nil && gpuDevice != nil {
-				args = append(args, "--device", gpuDevice.VFIODevice)
-				utils.LogInfo("using VFIO GPU passthrough: %s (IOMMU group: %s)", gpuDevice.VFIODevice, gpuDevice.IOMMUGroup)
-			} else {
-				utils.LogWarn("VFIO GPU not available for Kata: %v", err)
-			}
-		} else if runtime == "runsc" {
-			args = append(args, "--gpus=all")
-			args = append(args, "-e", "NVIDIA_VISIBLE_DEVICES=all")
-			args = append(args, "-e", "NVIDIA_DRIVER_CAPABILITIES=compute,utility")
-		} else {
-			args = append(args, "--gpus=all")
-		}
+		args = append(args, "--gpus=all")
 	}
 
 	if data.CPUs != "" {
@@ -178,12 +95,9 @@ func StartInstance(data CreateInstance) error {
 		args = append(args, "sleep", "infinity")
 	}
 
-	cmd := exec.Command(containerCmd, args...)
+	cmd := exec.Command("docker", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		if usesLUKS() {
-			security.DeleteVolume()
-		}
 		return errors.InstanceStartError{Err: fmt.Errorf("%v: %s", err, string(output))}
 	}
 
@@ -202,11 +116,6 @@ func ManageInstance(cmd InstanceCommand) error {
 		return errors.NoInstanceRunningError{}
 	}
 
-	if cmd == StartCommand && usesLUKS() && !security.IsActive() {
-		return errors.LUKSVolumeNotActiveError{}
-	}
-
-	containerCmd := getContainerCmd()
 	var action string
 	switch cmd {
 	case StartCommand:
@@ -214,7 +123,7 @@ func ManageInstance(cmd InstanceCommand) error {
 	case StopCommand:
 		action = "pause"
 	case RebootCommand:
-		if err := exec.Command(containerCmd, "restart", currentContainerID).Run(); err != nil {
+		if err := exec.Command("docker", "restart", currentContainerID).Run(); err != nil {
 			return errors.InstanceManageError{Err: err}
 		}
 		return nil
@@ -222,9 +131,7 @@ func ManageInstance(cmd InstanceCommand) error {
 		return errors.UnknownCommandError{Command: string(cmd)}
 	}
 
-	utils.LogWarn("Manage command: %s %s %s", containerCmd, action, currentContainerID)
-
-	if err := exec.Command(containerCmd, action, currentContainerID).Run(); err != nil {
+	if err := exec.Command("docker", action, currentContainerID).Run(); err != nil {
 		return errors.InstanceManageError{Err: err}
 	}
 	return nil
@@ -235,13 +142,8 @@ func StopInstance() error {
 		return nil
 	}
 
-	containerCmd := getContainerCmd()
-	exec.Command(containerCmd, "stop", currentContainerID).Run()
-	exec.Command(containerCmd, "rm", "-f", currentContainerID).Run()
-
-	if usesLUKS() {
-		security.DeleteVolume()
-	}
+	exec.Command("docker", "stop", currentContainerID).Run()
+	exec.Command("docker", "rm", "-f", currentContainerID).Run()
 
 	currentContainerID = ""
 	allocatedPorts = nil

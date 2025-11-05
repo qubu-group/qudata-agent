@@ -1,18 +1,14 @@
 package main
 
 import (
-	"github.com/magicaleks/qudata-agent-alpha/internal/containers"
 	"github.com/magicaleks/qudata-agent-alpha/internal/models"
 	"github.com/magicaleks/qudata-agent-alpha/internal/runtime"
-	"github.com/magicaleks/qudata-agent-alpha/internal/security"
 	"github.com/magicaleks/qudata-agent-alpha/internal/server"
 	"github.com/magicaleks/qudata-agent-alpha/internal/storage"
 	"github.com/magicaleks/qudata-agent-alpha/internal/utils"
 )
 
 func main() {
-	cleanupOrphanedResources()
-
 	rt := runtime.NewRuntime()
 	if !rt.Client.Ping() {
 		panic("qudata service is unavailable")
@@ -22,13 +18,6 @@ func main() {
 	go rt.StatsMonitoring()
 	s := server.NewServer(rt)
 	s.Run()
-}
-
-func cleanupOrphanedResources() {
-	if containers.GetRuntime() == "kata" && !containers.InstanceIsRunning() && security.IsActive() {
-		utils.LogInfo("cleaning up orphaned LUKS volume")
-		security.DeleteVolume()
-	}
 }
 
 func initAgent(runtime *runtime.Runtime) {
