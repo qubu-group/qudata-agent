@@ -1,53 +1,89 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
 if [ "$EUID" -ne 0 ]; then
     echo "Error: Must run as root"
     exit 1
 fi
 
-if [ -z "$1" ]; then
+if [ -z "${1:-}" ]; then
     echo "Usage: ./install.sh <QUDATA_API_KEY>"
     exit 1
 fi
 
 QUDATA_API_KEY=$1
+
+if [ ${#QUDATA_API_KEY} -lt 20 ]; then
+    echo "Error: Invalid API key (too short)"
+    exit 1
+fi
+
 INSTALL_DIR="/opt/qudata"
 BIN_DIR="$INSTALL_DIR/bin"
 LOG_DIR="/var/log/qudata"
+BACKUP_DIR="/tmp/qudata-backup-$(date +%s)"
+
+echo "==> Checking system requirements"
+AVAILABLE_SPACE=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
+if [ "$AVAILABLE_SPACE" -lt 5 ]; then
+    echo "Error: Not enough disk space (need 5GB, have ${AVAILABLE_SPACE}GB)"
+    exit 1
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+    echo "Error: curl not found, installing..."
+    apt-get update -qq && apt-get install -y curl
+fi
 
 echo "==> Creating directories"
 mkdir -p $INSTALL_DIR $BIN_DIR $LOG_DIR /var/lib/qudata
 
-echo "==> Removing old NVIDIA installations"
+echo "==> Backing up current configuration"
+mkdir -p "$BACKUP_DIR"
+[ -f /etc/docker/daemon.json ] && cp /etc/docker/daemon.json "$BACKUP_DIR/" 2>/dev/null || true
+[ -f /etc/qudata.env ] && cp /etc/qudata.env "$BACKUP_DIR/" 2>/dev/null || true
+echo "Backup created at: $BACKUP_DIR"
+
+echo "==> Checking NVIDIA GPU"
+HAS_NVIDIA=0
 if lspci 2>/dev/null | grep -qi nvidia; then
-  echo "NVIDIA GPU detected, force removing old packages"
+  HAS_NVIDIA=1
+  echo "NVIDIA GPU detected"
   
-  systemctl stop nvidia-persistenced 2>/dev/null || true
-  rmmod nvidia_uvm 2>/dev/null || true
-  rmmod nvidia_drm 2>/dev/null || true
-  rmmod nvidia_modeset 2>/dev/null || true
-  rmmod nvidia 2>/dev/null || true
-  
-  rm -rf /var/lib/dkms/nvidia* 2>/dev/null || true
-  rm -f /etc/kernel/postinst.d/dkms 2>/dev/null || true
-  
-  for pkg in $(dpkg -l | grep nvidia | awk '{print $2}'); do
-    dpkg --remove --force-remove-reinstreq --force-depends $pkg 2>/dev/null || true
-  done
-  
-  for pkg in $(dpkg -l | grep libnvidia | awk '{print $2}'); do
-    dpkg --remove --force-remove-reinstreq --force-depends $pkg 2>/dev/null || true
-  done
-  
-  apt-get autoremove -y 2>/dev/null || true
-  apt-get autoclean 2>/dev/null || true
-  
-  rm -rf /etc/modprobe.d/nvidia*.conf 2>/dev/null || true
-  rm -rf /usr/share/X11/xorg.conf.d/nvidia*.conf 2>/dev/null || true
-  
-  echo "Old NVIDIA packages force removed"
+  if lsmod | grep -q nvidia && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+    echo "NVIDIA drivers already working, skipping cleanup"
+  else
+    echo "Cleaning up broken NVIDIA installation"
+    
+    systemctl stop nvidia-persistenced 2>/dev/null || true
+    
+    rmmod nvidia_uvm 2>/dev/null || true
+    rmmod nvidia_drm 2>/dev/null || true
+    rmmod nvidia_modeset 2>/dev/null || true
+    rmmod nvidia 2>/dev/null || true
+    
+    if [ -d /var/lib/dkms/nvidia* ]; then
+      rm -rf /var/lib/dkms/nvidia* 2>/dev/null || true
+    fi
+    
+    if [ -f /etc/kernel/postinst.d/dkms ]; then
+      mv /etc/kernel/postinst.d/dkms /etc/kernel/postinst.d/dkms.disabled 2>/dev/null || true
+    fi
+    
+    dpkg --remove --force-all nvidia-dkms-* 2>/dev/null || true
+    
+    NVIDIA_PKGS=$(dpkg -l | grep -E "^ii.*(nvidia|libnvidia)" | awk '{print $2}' | tr '\n' ' ')
+    if [ -n "$NVIDIA_PKGS" ]; then
+      for pkg in $NVIDIA_PKGS; do
+        dpkg --purge --force-all "$pkg" 2>/dev/null || true
+      done
+    fi
+    
+    apt-get autoremove -y --purge 2>/dev/null || true
+    
+    echo "Cleanup complete"
+  fi
 else
   echo "No NVIDIA GPU detected"
 fi
@@ -171,24 +207,22 @@ else
   fi
 fi
 
-echo "==> Installing fresh NVIDIA drivers"
-if lspci 2>/dev/null | grep -qi nvidia; then
+echo "==> Installing NVIDIA drivers"
+if [ "$HAS_NVIDIA" -eq 1 ] && ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "Installing NVIDIA driver 535"
   
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     nvidia-driver-535 \
     nvidia-utils-535 \
     libnvidia-compute-535 \
-    libnvidia-encode-535 \
-    libnvidia-decode-535 \
-    libnvidia-ml-dev
-  
-  modprobe nvidia 2>/dev/null || echo "Module not loaded (reboot required)"
-  modprobe nvidia-uvm 2>/dev/null || true
-  
-  echo "NVIDIA driver 535 installed"
+    libnvidia-ml-dev; then
+    echo "NVIDIA driver installed successfully"
+    modprobe nvidia 2>/dev/null || echo "Module load will require reboot"
+  else
+    echo "Warning: NVIDIA driver installation failed, continuing..."
+  fi
 else
-  echo "No NVIDIA GPU, installing only dev headers"
+  echo "Installing development headers only"
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libnvidia-ml-dev 2>/dev/null || true
 fi
 
@@ -279,11 +313,20 @@ git clone https://github.com/magicaleks/qudata-agent-alpha.git
 cd qudata-agent-alpha
 
 echo "==> Building agent"
-/usr/local/go/bin/go build -tags linux -o $BIN_DIR/qudata-agent ./cmd/app
-/usr/local/go/bin/go build -tags linux -o $BIN_DIR/qudata-security ./cmd/security
+if ! /usr/local/go/bin/go build -tags linux -o $BIN_DIR/qudata-agent ./cmd/app; then
+  echo "Error: Failed to build qudata-agent"
+  exit 1
+fi
+
+if ! /usr/local/go/bin/go build -tags linux -o $BIN_DIR/qudata-security ./cmd/security; then
+  echo "Error: Failed to build qudata-security"
+  exit 1
+fi
 
 chmod +x $BIN_DIR/qudata-agent
 chmod +x $BIN_DIR/qudata-security
+
+echo "Build completed successfully"
 
 echo "==> Setup environment variables"
 
@@ -345,15 +388,47 @@ echo "==> Cleaning up"
 cd /
 rm -rf /tmp/qudata-agent-alpha
 
-echo "==> Installation complete"
+echo "==> Verifying installation"
+ERRORS=0
 
-if ! command -v nvidia-smi >/dev/null 2>&1 || ! nvidia-smi >/dev/null 2>&1; then
-  if lspci 2>/dev/null | grep -qi nvidia; then
-    echo ""
-    echo "NOTE: NVIDIA drivers installed but not loaded"
-    echo "  Please reboot: sudo reboot"
-    echo ""
-  fi
+if ! systemctl is-active --quiet qudata-agent; then
+  echo "Warning: qudata-agent service is not running"
+  ERRORS=$((ERRORS + 1))
+fi
+
+if ! systemctl is-active --quiet qudata-security; then
+  echo "Warning: qudata-security service is not running"
+  ERRORS=$((ERRORS + 1))
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Warning: Docker is not installed"
+  ERRORS=$((ERRORS + 1))
+fi
+
+echo ""
+echo "==> Installation complete"
+echo ""
+echo "Services status:"
+echo "  qudata-agent:    $(systemctl is-active qudata-agent 2>/dev/null || echo 'inactive')"
+echo "  qudata-security: $(systemctl is-active qudata-security 2>/dev/null || echo 'inactive')"
+echo ""
+echo "Logs:"
+echo "  Agent:    journalctl -u qudata-agent -f"
+echo "  Security: journalctl -u qudata-security -f"
+echo ""
+echo "Backup saved at: $BACKUP_DIR"
+echo ""
+
+if [ "$HAS_NVIDIA" -eq 1 ] && ! nvidia-smi >/dev/null 2>&1; then
+  echo "NOTE: NVIDIA GPU detected but drivers not loaded"
+  echo "      Reboot required: sudo reboot"
+  echo ""
+fi
+
+if [ "$ERRORS" -gt 0 ]; then
+  echo "Warning: Installation completed with $ERRORS warnings"
+  exit 0
 fi
 
 echo "Installation completed successfully!"
