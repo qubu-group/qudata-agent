@@ -63,9 +63,7 @@ if lspci 2>/dev/null | grep -qi nvidia; then
     rmmod nvidia_modeset 2>/dev/null || true
     rmmod nvidia 2>/dev/null || true
     
-    if [ -d /var/lib/dkms/nvidia* ]; then
-      rm -rf /var/lib/dkms/nvidia* 2>/dev/null || true
-    fi
+    rm -rf /var/lib/dkms/nvidia* 2>/dev/null || true
     
     if [ -f /etc/kernel/postinst.d/dkms ]; then
       mv /etc/kernel/postinst.d/dkms /etc/kernel/postinst.d/dkms.disabled 2>/dev/null || true
