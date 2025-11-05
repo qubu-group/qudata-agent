@@ -409,16 +409,6 @@ fi
 echo ""
 echo "==> Installation complete"
 echo ""
-echo "Services status:"
-echo "  qudata-agent:    $(systemctl is-active qudata-agent 2>/dev/null || echo 'inactive')"
-echo "  qudata-security: $(systemctl is-active qudata-security 2>/dev/null || echo 'inactive')"
-echo ""
-echo "Logs:"
-echo "  Agent:    journalctl -u qudata-agent -f"
-echo "  Security: journalctl -u qudata-security -f"
-echo ""
-echo "Backup saved at: $BACKUP_DIR"
-echo ""
 
 if [ "$HAS_NVIDIA" -eq 1 ] && ! nvidia-smi >/dev/null 2>&1; then
   echo "NOTE: NVIDIA GPU detected but drivers not loaded"

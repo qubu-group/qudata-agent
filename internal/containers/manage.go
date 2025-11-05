@@ -74,6 +74,13 @@ func usesLUKS() bool {
 	return detectedRuntime == "kata"
 }
 
+func getContainerCmd() string {
+	if detectedRuntime == "kata" {
+		return "nerdctl"
+	}
+	return "docker"
+}
+
 func StartInstance(data CreateInstance) error {
 	if currentContainerID != "" {
 		return errors.InstanceAlreadyRunningError{}
@@ -104,7 +111,8 @@ func StartInstance(data CreateInstance) error {
 
 	if data.Registry != "" {
 		if data.Login != "" && data.Password != "" {
-			loginCmd := exec.Command("docker", "login", data.Registry, "-u", data.Login, "-p", data.Password)
+			containerCmd := getContainerCmd()
+			loginCmd := exec.Command(containerCmd, "login", data.Registry, "-u", data.Login, "-p", data.Password)
 			if err := loginCmd.Run(); err != nil {
 				if usesLUKS() {
 					security.DeleteVolume()
@@ -116,7 +124,17 @@ func StartInstance(data CreateInstance) error {
 	}
 
 	runtime := detectedRuntime
-	args := []string{"run", "-d", "--runtime=" + runtime}
+	containerCmd := getContainerCmd()
+	var args []string
+
+	if runtime == "kata" {
+		args = []string{"run", "-d", "--runtime=io.containerd.kata.v2"}
+	} else {
+		args = []string{"run", "-d"}
+		if runtime == "runsc" {
+			args = append(args, "--runtime="+runtime)
+		}
+	}
 
 	if hasGPU() {
 		if runtime == "kata" {
@@ -152,7 +170,7 @@ func StartInstance(data CreateInstance) error {
 		args = append(args, "sleep", "infinity")
 	}
 
-	cmd := exec.Command("docker", args...)
+	cmd := exec.Command(containerCmd, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if usesLUKS() {
@@ -180,14 +198,15 @@ func ManageInstance(cmd InstanceCommand) error {
 		return errors.LUKSVolumeNotActiveError{}
 	}
 
-	var dockerCmd string
+	containerCmd := getContainerCmd()
+	var action string
 	switch cmd {
 	case StartCommand:
-		dockerCmd = "unpause"
+		action = "unpause"
 	case StopCommand:
-		dockerCmd = "pause"
+		action = "pause"
 	case RebootCommand:
-		if err := exec.Command("docker", "restart", currentContainerID).Run(); err != nil {
+		if err := exec.Command(containerCmd, "restart", currentContainerID).Run(); err != nil {
 			return errors.InstanceManageError{Err: err}
 		}
 		return nil
@@ -195,9 +214,9 @@ func ManageInstance(cmd InstanceCommand) error {
 		return errors.UnknownCommandError{Command: string(cmd)}
 	}
 
-	utils.LogWarn("Manage command: docker %s %s", dockerCmd, currentContainerID)
+	utils.LogWarn("Manage command: %s %s %s", containerCmd, action, currentContainerID)
 
-	if err := exec.Command("docker", dockerCmd, currentContainerID).Run(); err != nil {
+	if err := exec.Command(containerCmd, action, currentContainerID).Run(); err != nil {
 		return errors.InstanceManageError{Err: err}
 	}
 	return nil
@@ -208,8 +227,9 @@ func StopInstance() error {
 		return nil
 	}
 
-	exec.Command("docker", "stop", currentContainerID).Run()
-	exec.Command("docker", "rm", "-f", currentContainerID).Run()
+	containerCmd := getContainerCmd()
+	exec.Command(containerCmd, "stop", currentContainerID).Run()
+	exec.Command(containerCmd, "rm", "-f", currentContainerID).Run()
 
 	if usesLUKS() {
 		security.DeleteVolume()
