@@ -31,7 +31,6 @@ func GetInstanceStatus() InstanceStatus {
 	}
 
 	status := strings.TrimSpace(string(output))
-	utils.LogInfo(fmt.Sprintf("Container status for %s", currentContainerID))
 	switch status {
 	case "running":
 		return RunningStatus

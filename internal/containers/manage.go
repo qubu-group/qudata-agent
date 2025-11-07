@@ -70,7 +70,12 @@ func StartInstance(data CreateInstance) error {
 		"-t",
 		"--init",
 		"--restart=unless-stopped",
-		"--gpus=all",
+	}
+
+	if hasGPU() {
+		args = append(args, "--gpus=all")
+		args = append(args, "-e", "NVIDIA_VISIBLE_DEVICES=all")
+		args = append(args, "-e", "NVIDIA_DRIVER_CAPABILITIES=compute,utility")
 	}
 
 	if data.CPUs != "" {
