@@ -3,11 +3,19 @@ package containers
 import (
 	"github.com/magicaleks/qudata-agent-alpha/internal/errors"
 	"os/exec"
+	"time"
 )
 
 func InitSSH() error {
 	if currentContainerID == "" {
 		return errors.NoInstanceRunningError{}
+	}
+
+	time.Sleep(2 * time.Second)
+
+	checkCmd := exec.Command("docker", "exec", currentContainerID, "pgrep", "sshd")
+	if err := checkCmd.Run(); err == nil {
+		return nil
 	}
 
 	commands := [][]string{

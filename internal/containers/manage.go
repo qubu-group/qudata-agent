@@ -11,6 +11,7 @@ import (
 var (
 	currentContainerID string
 	allocatedPorts     map[string]string
+	sshEnabled         bool
 )
 
 type CreateInstance struct {
@@ -110,6 +111,7 @@ func StartInstance(data CreateInstance) error {
 
 	currentContainerID = strings.TrimSpace(string(output))
 	allocatedPorts = data.Ports
+	sshEnabled = data.SSHEnabled
 
 	if data.SSHEnabled {
 		go InitSSH()
@@ -133,6 +135,9 @@ func ManageInstance(cmd InstanceCommand) error {
 		if err := exec.Command("docker", "restart", currentContainerID).Run(); err != nil {
 			return errors.InstanceManageError{Err: err}
 		}
+		if sshEnabled {
+			go InitSSH()
+		}
 		return nil
 	default:
 		return errors.UnknownCommandError{Command: string(cmd)}
@@ -154,5 +159,6 @@ func StopInstance() error {
 
 	currentContainerID = ""
 	allocatedPorts = nil
+	sshEnabled = false
 	return nil
 }
