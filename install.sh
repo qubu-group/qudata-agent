@@ -6,6 +6,9 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+REPO_URL="${REPO_URL:-https://github.com/magicaleks/qudata-agent-alpha.git}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/qudata-agent}"
+
 apt-get update -qq
 apt-get install -y -qq \
     build-essential \
@@ -30,7 +33,7 @@ if ! command -v docker >/dev/null 2>&1; then
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
     apt-get update -qq
     apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    systemctl enable docker
+    systemctl enable docker >/dev/null 2>&1
     systemctl start docker
 fi
 
@@ -41,7 +44,7 @@ if ! command -v nvidia-ctk >/dev/null 2>&1; then
         tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null
     apt-get update -qq
     apt-get install -y -qq nvidia-container-toolkit
-    nvidia-ctk runtime configure --runtime=docker
+    nvidia-ctk runtime configure --runtime=docker >/dev/null 2>&1
     systemctl restart docker
 fi
 
@@ -51,12 +54,19 @@ if ! command -v go >/dev/null 2>&1; then
     rm -rf /usr/local/go
     tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
     rm go${GO_VERSION}.linux-amd64.tar.gz
-    echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
+    if ! grep -q "/usr/local/go/bin" /etc/profile; then
+        echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
+    fi
 fi
 export PATH=$PATH:/usr/local/go/bin
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+if [ -d "$INSTALL_DIR" ]; then
+    cd "$INSTALL_DIR"
+    git pull -q
+else
+    git clone -q "$REPO_URL" "$INSTALL_DIR"
+    cd "$INSTALL_DIR"
+fi
 
 rm -f /usr/local/bin/qudata-agent
 CGO_ENABLED=1 go build -o /usr/local/bin/qudata-agent ./cmd/app
@@ -88,7 +98,7 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable qudata-agent
+systemctl enable qudata-agent >/dev/null 2>&1
 systemctl restart qudata-agent
 sleep 2
 
@@ -101,13 +111,15 @@ fi
 echo "Installation successful"
 echo ""
 if command -v nvidia-smi >/dev/null 2>&1; then
-    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1)
-    GPU_MEMORY=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1)
-    GPU_DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1)
+    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 || echo "")
+    GPU_MEMORY=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 || echo "")
+    GPU_DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 || echo "")
     
-    if [ -n "$GPU_NAME" ]; then
+    if [ -n "$GPU_NAME" ] && [ -n "$GPU_MEMORY" ]; then
         echo "GPU: $GPU_NAME"
         echo "VRAM: ${GPU_MEMORY} MB"
-        echo "Driver: $GPU_DRIVER"
+        if [ -n "$GPU_DRIVER" ]; then
+            echo "Driver: $GPU_DRIVER"
+        fi
     fi
 fi
