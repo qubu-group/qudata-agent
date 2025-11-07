@@ -1,204 +1,113 @@
 #!/bin/bash
-
 set -euo pipefail
 
 if [ "$EUID" -ne 0 ]; then
-    echo "Error: Must run as root"
+    echo "Error: root required"
     exit 1
 fi
 
-if [ -z "${1:-}" ]; then
-    echo "Usage: ./install.sh <QUDATA_API_KEY>"
-    exit 1
+apt-get update -qq
+apt-get install -y -qq \
+    build-essential \
+    git \
+    curl \
+    wget \
+    ca-certificates \
+    gnupg \
+    lsb-release \
+    libnvidia-ml-dev \
+    cryptsetup \
+    cryptsetup-bin \
+    device-mapper \
+    apparmor \
+    apparmor-utils
+
+if ! command -v docker >/dev/null 2>&1; then
+    apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    apt-get update -qq
+    apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    systemctl enable docker
+    systemctl start docker
 fi
 
-QUDATA_API_KEY=$1
-
-if [ ${#QUDATA_API_KEY} -lt 20 ]; then
-    echo "Error: Invalid API key (too short)"
-    exit 1
+if ! command -v nvidia-ctk >/dev/null 2>&1; then
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+        tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null
+    apt-get update -qq
+    apt-get install -y -qq nvidia-container-toolkit
+    nvidia-ctk runtime configure --runtime=docker
+    systemctl restart docker
 fi
 
-INSTALL_DIR="/opt/qudata"
-BIN_DIR="$INSTALL_DIR/bin"
-LOG_DIR="/var/log/qudata"
-
-echo "==> Creating directories"
-mkdir -p $INSTALL_DIR $BIN_DIR $LOG_DIR /var/lib/qudata
-
-echo "==> Installing system dependencies"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq build-essential git curl gnupg ca-certificates wget
-
-echo "==> Checking NVIDIA driver status"
-if command -v nvidia-smi >/dev/null 2>&1; then
-    if ! nvidia-smi >/dev/null 2>&1; then
-        ERROR_OUTPUT=$(nvidia-smi 2>&1 || true)
-        if echo "$ERROR_OUTPUT" | grep -q "Driver/library version mismatch"; then
-            echo "⚠ Driver/library version mismatch detected - fixing"
-            
-            systemctl stop docker 2>/dev/null || true
-            
-            rmmod nvidia_drm 2>/dev/null || true
-            rmmod nvidia_modeset 2>/dev/null || true
-            rmmod nvidia_uvm 2>/dev/null || true
-            rmmod nvidia 2>/dev/null || true
-            
-            DRIVER_PKG=$(dpkg -l | grep -E "^ii.*nvidia-driver-[0-9]+" | awk '{print $2}' | head -n1)
-            if [ -n "$DRIVER_PKG" ]; then
-                echo "Reinstalling $DRIVER_PKG"
-                apt-get install --reinstall -y -qq $DRIVER_PKG 2>/dev/null || true
-            fi
-            
-            modprobe nvidia 2>/dev/null || true
-            
-            if ! nvidia-smi >/dev/null 2>&1; then
-                echo "⚠ Reboot required to fix driver mismatch"
-                echo "Run: sudo reboot"
-                exit 1
-            fi
-        fi
-    fi
-    echo "✓ NVIDIA drivers OK"
-else
-    echo "⚠ nvidia-smi not found - install: apt-get install nvidia-driver-560"
+GO_VERSION="1.23.4"
+if ! command -v go >/dev/null 2>&1; then
+    wget -q https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
+    rm go${GO_VERSION}.linux-amd64.tar.gz
+    echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
 fi
-
-echo "==> Installing NVIDIA ML headers"
-apt-get install -y -qq libnvidia-ml-dev || {
-    if command -v nvidia-smi >/dev/null 2>&1; then
-        apt-get install -y -qq nvidia-utils-* libnvidia-compute-* 2>/dev/null || true
-    fi
-}
-
-echo "==> Installing Docker"
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
-apt-get update -qq
-apt-get install -y -qq docker-ce docker-ce-cli containerd.io
-
-systemctl enable docker
-systemctl start docker
-
-echo "==> Installing NVIDIA Container Toolkit"
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-  tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
-
-apt-get update -qq
-apt-get install -y -qq nvidia-container-toolkit
-nvidia-ctk runtime configure --runtime=docker
-systemctl restart docker
-
-echo "==> Installing Go"
-GO_VERSION="1.23.0"
-wget -q https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz -O /tmp/go.tar.gz
-rm -rf /usr/local/go
-tar -C /usr/local -xzf /tmp/go.tar.gz
-rm /tmp/go.tar.gz
-
 export PATH=$PATH:/usr/local/go/bin
-export CGO_ENABLED=1
 
-echo "==> Cloning repository"
-cd /tmp
-rm -rf qudata-agent-alpha
-git clone https://github.com/magicaleks/qudata-agent-alpha.git
-cd qudata-agent-alpha
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
-echo "==> Building agent"
-if ! /usr/local/go/bin/go build -tags linux -o $BIN_DIR/qudata-agent ./cmd/app; then
-    echo "ERROR: Failed to build qudata-agent"
-    echo "Checking NVML installation:"
-    dpkg -l | grep nvidia-ml || echo "libnvidia-ml-dev not found"
-    ls -la /usr/include/nvml.h 2>/dev/null || echo "nvml.h not found in /usr/include"
-    ls -la /usr/lib/x86_64-linux-gnu/libnvidia-ml.so* 2>/dev/null || echo "libnvidia-ml.so not found"
-    exit 1
-fi
+rm -f /usr/local/bin/qudata-agent
+CGO_ENABLED=1 go build -o /usr/local/bin/qudata-agent ./cmd/app
+chmod +x /usr/local/bin/qudata-agent
 
-if ! /usr/local/go/bin/go build -tags linux -o $BIN_DIR/qudata-security ./cmd/security; then
-    echo "ERROR: Failed to build qudata-security"
-    exit 1
-fi
+mkdir -p /var/lib/qudata/data
+mkdir -p /etc/qudata
 
-chmod +x $BIN_DIR/qudata-agent
-chmod +x $BIN_DIR/qudata-security
-
-echo "Build completed successfully"
-
-echo "==> Setup environment"
-cat > /etc/qudata.env <<EOF
-QUDATA_API_KEY=$QUDATA_API_KEY
-CGO_ENABLED=1
-EOF
-chmod 600 /etc/qudata.env
-
-echo "==> Installing systemd services"
-cat > /etc/systemd/system/qudata-agent.service <<EOF
+cat > /etc/systemd/system/qudata-agent.service <<'EOF'
 [Unit]
-Description=Qudata Agent
+Description=QuData Agent
 After=network.target docker.service
 Requires=docker.service
 
 [Service]
 Type=simple
 User=root
-EnvironmentFile=/etc/qudata.env
-ExecStart=$BIN_DIR/qudata-agent
+ExecStart=/usr/local/bin/qudata-agent
 Restart=always
 RestartSec=10
-StandardOutput=append:/var/log/qudata/agent.log
-StandardError=append:/var/log/qudata/agent.error.log
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-cat > /etc/systemd/system/qudata-security.service <<EOF
-[Unit]
-Description=Qudata Security Monitor
-After=network.target
-
-[Service]
-Type=simple
-User=root
-EnvironmentFile=/etc/qudata.env
-ExecStart=$BIN_DIR/qudata-security
-Restart=always
-RestartSec=10
-StandardOutput=append:/var/log/qudata/security.log
-StandardError=append:/var/log/qudata/security.error.log
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=qudata-agent
+Environment="QUDATA_SERVICE_URL=https://api.qudata.com"
+Environment="QUDATA_AGENT_PORT=7070"
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable qudata-agent qudata-security
-systemctl start qudata-agent qudata-security
+systemctl enable qudata-agent
+systemctl restart qudata-agent
+sleep 2
 
-cd /
-rm -rf /tmp/qudata-agent-alpha
-
-echo ""
-echo "=========================================="
-echo "INSTALLATION COMPLETE"
-echo "=========================================="
-echo ""
-
-echo "GPU Detection:"
-if command -v nvidia-smi >/dev/null 2>&1; then
-    GPU_INFO=$(nvidia-smi --query-gpu=name,driver_version,cuda_version --format=csv,noheader 2>/dev/null | head -n1)
-    if [ -n "$GPU_INFO" ]; then
-        echo "  ✓ $GPU_INFO"
-    else
-        echo "  ⚠ nvidia-smi found but GPU info unavailable"
-    fi
-else
-    echo "  ✗ nvidia-smi not found - NVIDIA drivers may not be installed"
-    echo "    Install drivers: sudo apt-get install nvidia-driver-560"
+if ! systemctl is-active --quiet qudata-agent; then
+    echo "Error: agent failed to start"
+    journalctl -u qudata-agent -n 20 --no-pager
+    exit 1
 fi
+
+echo "Installation successful"
 echo ""
+if command -v nvidia-smi >/dev/null 2>&1; then
+    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1)
+    GPU_MEMORY=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1)
+    GPU_DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1)
+    
+    if [ -n "$GPU_NAME" ]; then
+        echo "GPU: $GPU_NAME"
+        echo "VRAM: ${GPU_MEMORY} MB"
+        echo "Driver: $GPU_DRIVER"
+    fi
+fi
