@@ -43,8 +43,13 @@ func NewRuntime() *Runtime {
 // StatsMonitoring is background task which sends instance stats to qudata
 func (r *Runtime) StatsMonitoring() {
 	var request *models.StatsRequest
+	i := 0
 	for {
 		if containers.InstanceIsRunning() {
+			if i%20 == 0 {
+				utils.LogWarn("Current stats: %s GPU: %s CPU: %s", containers.GetInstanceStatus(), utils.GetGPUUtil(), utils.GetCPUUtil())
+			}
+			i++
 			request = &models.StatsRequest{
 				GPUUtil: utils.GetGPUUtil(),
 				CPUUtil: utils.GetCPUUtil(),
