@@ -19,6 +19,10 @@ const (
 )
 
 func GetInstanceStatus() InstanceStatus {
+	if isPulling {
+		return PendingStatus
+	}
+
 	if currentContainerID == "" {
 		return DestroyedStatus
 	}
@@ -52,5 +56,5 @@ func GetInstanceStatus() InstanceStatus {
 }
 
 func InstanceIsRunning() bool {
-	return currentContainerID != ""
+	return currentContainerID != "" || isPulling
 }

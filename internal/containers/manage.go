@@ -12,6 +12,8 @@ var (
 	currentContainerID string
 	allocatedPorts     map[string]string
 	sshEnabled         bool
+	isPulling          bool
+	pendingData        *CreateInstance
 )
 
 type CreateInstance struct {
@@ -45,8 +47,41 @@ func hasGPU() bool {
 	return false
 }
 
+func imageExists(image string) bool {
+	cmd := exec.Command("docker", "image", "inspect", image)
+	return cmd.Run() == nil
+}
+
+func pullImageAsync(data CreateInstance) {
+	isPulling = true
+	defer func() {
+		isPulling = false
+		pendingData = nil
+	}()
+
+	image := data.Image
+	if data.Registry != "" {
+		if data.Login != "" && data.Password != "" {
+			loginCmd := exec.Command("docker", "login", data.Registry, "-u", data.Login, "-p", data.Password)
+			loginCmd.Run()
+		}
+		image = data.Registry + "/" + image
+	}
+
+	pullCmd := exec.Command("docker", "pull", image)
+	if err := pullCmd.Run(); err != nil {
+		return
+	}
+
+	StartInstance(data)
+}
+
 func StartInstance(data CreateInstance) error {
 	if currentContainerID != "" {
+		return errors.InstanceAlreadyRunningError{}
+	}
+
+	if isPulling {
 		return errors.InstanceAlreadyRunningError{}
 	}
 
@@ -63,6 +98,12 @@ func StartInstance(data CreateInstance) error {
 			}
 		}
 		image = data.Registry + "/" + image
+	}
+
+	if !imageExists(image) {
+		pendingData = &data
+		go pullImageAsync(data)
+		return nil
 	}
 
 	args := []string{
@@ -150,6 +191,9 @@ func ManageInstance(cmd InstanceCommand) error {
 }
 
 func StopInstance() error {
+	isPulling = false
+	pendingData = nil
+
 	if currentContainerID == "" {
 		return nil
 	}
