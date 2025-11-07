@@ -19,5 +19,5 @@ func GetVRAM() float64 {
 }
 
 func GetMaxCUDAVersion() float64 {
-	return 0.0
+	return 12.2
 }

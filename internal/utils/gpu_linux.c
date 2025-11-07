@@ -65,24 +65,20 @@ double get_gpu_vram() {
 
 double get_max_cuda_version() {
     nvmlReturn_t result;
-    nvmlDevice_t device;
-    int cudaMajor = 0, cudaMinor = 0;
+    int cudaVersion = 0;
 
     result = nvmlInit_v2();
     if (result != NVML_SUCCESS)
         return 0.0;
 
-    result = nvmlDeviceGetHandleByIndex_v2(0, &device);
-    if (result != NVML_SUCCESS) {
-        nvmlShutdown();
-        return 0.0;
-    }
-
-    result = nvmlDeviceGetCudaComputeCapability(device, &cudaMajor, &cudaMinor);
+    result = nvmlSystemGetCudaDriverVersion(&cudaVersion);
     nvmlShutdown();
 
     if (result != NVML_SUCCESS)
         return 0.0;
 
-    return (double)cudaMajor + ((double)cudaMinor / 10.0);
+    int major = cudaVersion / 1000;
+    int minor = (cudaVersion % 1000) / 10;
+    
+    return (double)major + ((double)minor / 10.0);
 }

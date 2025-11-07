@@ -1,6 +1,8 @@
 package containers
 
 import (
+	"fmt"
+	"github.com/magicaleks/qudata-agent-alpha/internal/utils"
 	"os/exec"
 	"strings"
 )
@@ -24,10 +26,12 @@ func GetInstanceStatus() InstanceStatus {
 	cmd := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", currentContainerID)
 	output, err := cmd.Output()
 	if err != nil {
+		utils.LogWarn(fmt.Sprintf("Failed to get container status for %s", currentContainerID))
 		return ErrorStatus
 	}
 
 	status := strings.TrimSpace(string(output))
+	utils.LogInfo(fmt.Sprintf("Container status for %s", currentContainerID))
 	switch status {
 	case "running":
 		return RunningStatus

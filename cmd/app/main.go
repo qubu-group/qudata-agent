@@ -42,20 +42,10 @@ func initAgent(runtime *runtime.Runtime) {
 			GPUName:       utils.GetGPUName(),
 			GPUAmount:     utils.GetGPUCount(),
 			VRAM:          utils.GetVRAM(),
+			MaxCUDA:       utils.GetMaxCUDAVersion(),
 			Configuration: utils.GetConfiguration(),
 		}
-		utils.LogInfo("creating host: %s", hostRequest.GPUName)
-		// TODO: rm while prod
-		//if hostRequest.GPUName == "" {
-		//	hostRequest.GPUName = "H100"
-		//}
-		//if hostRequest.GPUAmount == 0 {
-		//	hostRequest.GPUAmount = 1
-		//}
-		//if hostRequest.VRAM == 0 {
-		//	hostRequest.VRAM = 80
-		//}
-		// TODO: rm while prod
+		utils.LogInfo("creating host: %s (CUDA %.1f)", hostRequest.GPUName, hostRequest.MaxCUDA)
 		runtime.Client.CreateHost(hostRequest)
 	}
 }
