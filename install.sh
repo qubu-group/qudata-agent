@@ -18,7 +18,7 @@ apt-get install -y -qq \
     libnvidia-ml-dev \
     cryptsetup \
     cryptsetup-bin \
-    device-mapper \
+    dmsetup \
     apparmor \
     apparmor-utils
 
