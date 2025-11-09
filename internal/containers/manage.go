@@ -13,7 +13,7 @@ var (
 	allocatedPorts     map[string]string
 	sshEnabled         bool
 	isPulling          bool
-	pendingData        *CreateInstance
+	currentImage       string
 )
 
 type CreateInstance struct {
@@ -47,17 +47,17 @@ func hasGPU() bool {
 	return false
 }
 
-func imageExists(image string) bool {
-	cmd := exec.Command("docker", "image", "inspect", image)
-	return cmd.Run() == nil
+func StartInstance(data CreateInstance) error {
+	if currentContainerID != "" || isPulling {
+		return errors.InstanceAlreadyRunningError{}
+	}
+
+	go startInstanceAsync(data)
+	return nil
 }
 
-func pullImageAsync(data CreateInstance) {
+func startInstanceAsync(data CreateInstance) {
 	isPulling = true
-	defer func() {
-		isPulling = false
-		pendingData = nil
-	}()
 
 	image := data.Image
 	if data.Registry != "" {
@@ -68,43 +68,19 @@ func pullImageAsync(data CreateInstance) {
 		image = data.Registry + "/" + image
 	}
 
+	currentImage = image
+
 	pullCmd := exec.Command("docker", "pull", image)
 	if err := pullCmd.Run(); err != nil {
+		isPulling = false
+		currentImage = ""
 		return
 	}
 
-	StartInstance(data)
-}
-
-func StartInstance(data CreateInstance) error {
-	if currentContainerID != "" {
-		return errors.InstanceAlreadyRunningError{}
-	}
-
-	if isPulling {
-		return errors.InstanceAlreadyRunningError{}
-	}
+	isPulling = false
 
 	mountPoint := "/var/lib/qudata/data"
 	os.MkdirAll(mountPoint, 0755)
-
-	image := data.Image
-
-	if data.Registry != "" {
-		if data.Login != "" && data.Password != "" {
-			loginCmd := exec.Command("docker", "login", data.Registry, "-u", data.Login, "-p", data.Password)
-			if err := loginCmd.Run(); err != nil {
-				return errors.InstanceStartError{Err: err}
-			}
-		}
-		image = data.Registry + "/" + image
-	}
-
-	if !imageExists(image) {
-		pendingData = &data
-		go pullImageAsync(data)
-		return nil
-	}
 
 	args := []string{
 		"run",
@@ -147,7 +123,8 @@ func StartInstance(data CreateInstance) error {
 	cmd := exec.Command("docker", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return errors.InstanceStartError{Err: fmt.Errorf("%v: %s", err, string(output))}
+		currentImage = ""
+		return
 	}
 
 	currentContainerID = strings.TrimSpace(string(output))
@@ -157,8 +134,6 @@ func StartInstance(data CreateInstance) error {
 	if data.SSHEnabled {
 		go InitSSH()
 	}
-
-	return nil
 }
 
 func ManageInstance(cmd InstanceCommand) error {
@@ -192,16 +167,18 @@ func ManageInstance(cmd InstanceCommand) error {
 
 func StopInstance() error {
 	isPulling = false
-	pendingData = nil
 
-	if currentContainerID == "" {
-		return nil
+	if currentContainerID != "" {
+		exec.Command("docker", "stop", currentContainerID).Run()
+		exec.Command("docker", "rm", "-f", currentContainerID).Run()
 	}
 
-	exec.Command("docker", "stop", currentContainerID).Run()
-	exec.Command("docker", "rm", "-f", currentContainerID).Run()
+	if currentImage != "" {
+		exec.Command("docker", "rmi", "-f", currentImage).Run()
+	}
 
 	currentContainerID = ""
+	currentImage = ""
 	allocatedPorts = nil
 	sshEnabled = false
 	return nil
