@@ -1,7 +1,6 @@
 package containers
 
 import (
-	"fmt"
 	"github.com/magicaleks/qudata-agent-alpha/internal/errors"
 	"os"
 	"os/exec"
