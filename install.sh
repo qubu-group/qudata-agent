@@ -6,44 +6,33 @@ REPO_URL="${REPO_URL:-https://github.com/magicaleks/qudata-agent-alpha.git}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/qudata-agent}"
 LOG_FILE="/var/log/qudata-install.log"
 
-exec > >(tee -a "$LOG_FILE") 2>&1
+rm -f "$LOG_FILE"
+
+log() {
+    echo "$@" | tee -a "$LOG_FILE"
+}
+
+log_cmd() {
+    "$@" 2>&1 | tee -a "$LOG_FILE"
+    return ${PIPESTATUS[0]}
+}
 
 cleanup_on_error() {
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
-        exec 1>&2
-        echo "" >&2
-        echo "Installation failed with error code: $exit_code" >&2
-        echo "Full log saved to: $LOG_FILE" >&2
-        echo "Please contact qudata.ai support to solve the problem!" >&2
-        echo "" >&2
-        echo "Last 50 lines of log:" >&2
-        tail -n 50 "$LOG_FILE" | head -n -5 >&2
+        echo ""
+        echo "Installation failed with error code: $exit_code"
+        echo "Full log saved to: $LOG_FILE"
+        echo "Please contact qudata.ai support to solve the problem!"
+        echo ""
+        if [ -f "$LOG_FILE" ]; then
+            echo "Log contents:"
+            cat "$LOG_FILE"
+        fi
     fi
 }
 
 trap cleanup_on_error EXIT
-
-progress() {
-    local msg="$1"
-    shift
-    local tmp_err=$(mktemp)
-    echo -n "$msg"
-    if "$@" 2>"$tmp_err"; then
-        echo " done"
-        rm -f "$tmp_err"
-        return 0
-    else
-        local status=$?
-        echo " failed"
-        if [ -s "$tmp_err" ]; then
-            echo "Error output:"
-            cat "$tmp_err"
-        fi
-        rm -f "$tmp_err"
-        return $status
-    fi
-}
 
 if [ "$EUID" -ne 0 ]; then
     echo "Error: root required"
@@ -61,9 +50,9 @@ if [[ ! "$API_KEY" =~ ^ak- ]]; then
     exit 1
 fi
 
-echo "Installing system dependencies"
-progress "Updating package lists" apt-get update -qq
-progress "Installing packages" apt-get install -y -qq \
+log "Installing system dependencies"
+log_cmd apt-get update
+DEBIAN_FRONTEND=noninteractive log_cmd apt-get install -y \
     build-essential \
     git \
     curl \
@@ -79,33 +68,36 @@ progress "Installing packages" apt-get install -y -qq \
     apparmor-utils
 
 if ! command -v docker >/dev/null 2>&1; then
-    echo "Installing Docker"
+    log "Installing Docker"
     apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
     install -m 0755 -d /etc/apt/keyrings
-    progress "Adding Docker repository" bash -c "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && chmod a+r /etc/apt/keyrings/docker.gpg"
+    log_cmd bash -c "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && chmod a+r /etc/apt/keyrings/docker.gpg"
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-    progress "Installing Docker packages" bash -c "apt-get update -qq && apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+    log_cmd apt-get update
+    DEBIAN_FRONTEND=noninteractive log_cmd apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     systemctl enable docker >/dev/null 2>&1
     systemctl start docker
 fi
 
 if ! command -v nvidia-ctk >/dev/null 2>&1; then
-    echo "Installing NVIDIA Container Toolkit"
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    log "Installing NVIDIA Container Toolkit"
+    log_cmd curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey -o /tmp/nvidia.gpg
+    gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg /tmp/nvidia.gpg
     curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
         sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
         tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null
-    progress "Installing toolkit" bash -c "apt-get update -qq && apt-get install -y -qq nvidia-container-toolkit"
+    log_cmd apt-get update
+    DEBIAN_FRONTEND=noninteractive log_cmd apt-get install -y nvidia-container-toolkit
     nvidia-ctk runtime configure --runtime=docker >/dev/null 2>&1
     systemctl restart docker
 fi
 
 GO_VERSION="1.23.4"
 if ! command -v go >/dev/null 2>&1; then
-    echo "Installing Go $GO_VERSION"
-    progress "Downloading Go" wget -q https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz
+    log "Installing Go $GO_VERSION"
+    log_cmd wget https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz
     rm -rf /usr/local/go
-    progress "Extracting Go" tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
+    log_cmd tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
     rm go${GO_VERSION}.linux-amd64.tar.gz
     if ! grep -q "/usr/local/go/bin" /etc/profile; then
         echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
@@ -113,17 +105,17 @@ if ! command -v go >/dev/null 2>&1; then
 fi
 export PATH=$PATH:/usr/local/go/bin
 
-echo "Building QuData Agent"
+log "Building QuData Agent"
 if [ -d "$INSTALL_DIR" ]; then
     cd "$INSTALL_DIR"
-    progress "Updating repository" git pull -q
+    log_cmd git pull
 else
-    progress "Cloning repository" git clone -q "$REPO_URL" "$INSTALL_DIR"
+    log_cmd git clone "$REPO_URL" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
 
 rm -f /usr/local/bin/qudata-agent
-progress "Compiling agent" bash -c "CGO_ENABLED=1 go build -o /usr/local/bin/qudata-agent ./cmd/app"
+log_cmd bash -c "CGO_ENABLED=1 go build -o /usr/local/bin/qudata-agent ./cmd/app"
 chmod +x /usr/local/bin/qudata-agent
 
 mkdir -p /var/lib/qudata/data
@@ -152,15 +144,15 @@ Environment="QUDATA_AGENT_PORT=7070"
 WantedBy=multi-user.target
 EOF
 
-echo "Starting QuData Agent"
+log "Starting QuData Agent"
 systemctl daemon-reload
 systemctl enable qudata-agent >/dev/null 2>&1
 systemctl restart qudata-agent
-progress "Waiting for agent" sleep 3
+sleep 3
 
 if ! systemctl is-active --quiet qudata-agent; then
-    echo "Error: agent failed to start"
-    journalctl -u qudata-agent -n 20 --no-pager
+    log "Error: agent failed to start"
+    journalctl -u qudata-agent -n 20 --no-pager | tee -a "$LOG_FILE"
     exit 1
 fi
 
