@@ -11,33 +11,36 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 cleanup_on_error() {
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
-        echo ""
-        echo "Installation failed with error code: $exit_code"
-        echo "Full log saved to: $LOG_FILE"
-        echo "Please contact qudata.ai support to solve the problem!"
-        echo ""
-        echo "Last 100 lines of log:"
-        tail -n 100 "$LOG_FILE"
+        exec 1>&2
+        echo "" >&2
+        echo "Installation failed with error code: $exit_code" >&2
+        echo "Full log saved to: $LOG_FILE" >&2
+        echo "Please contact qudata.ai support to solve the problem!" >&2
+        echo "" >&2
+        echo "Last 50 lines of log:" >&2
+        tail -n 50 "$LOG_FILE" | head -n -5 >&2
     fi
 }
 
 trap cleanup_on_error EXIT
 
 progress() {
-    echo -n "$1"
+    local msg="$1"
     shift
-    "$@" >/dev/null 2>&1 &
-    local pid=$!
-    while kill -0 $pid 2>/dev/null; do
-        echo -n "."
-        sleep 0.5
-    done
-    wait $pid
-    local status=$?
-    if [ $status -eq 0 ]; then
+    local tmp_err=$(mktemp)
+    echo -n "$msg"
+    if "$@" 2>"$tmp_err"; then
         echo " done"
+        rm -f "$tmp_err"
+        return 0
     else
+        local status=$?
         echo " failed"
+        if [ -s "$tmp_err" ]; then
+            echo "Error output:"
+            cat "$tmp_err"
+        fi
+        rm -f "$tmp_err"
         return $status
     fi
 }
@@ -166,7 +169,9 @@ trap - EXIT
 echo ""
 echo "Installation successful"
 echo ""
-rm 
+
+rm -f "$LOG_FILE"
+
 if command -v nvidia-smi >/dev/null 2>&1; then
     GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 || echo "")
     GPU_MEMORY=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 || echo "")
