@@ -24,7 +24,7 @@ func GetFingerprint() string {
 		parts = append(parts, strings.TrimSpace(string(b)))
 	}
 
-	if serial := C.getGpuSerial(); name != nil {
+	if serial := C.getGpuSerial(); serial != nil {
 		parts = append(parts, C.GoString(serial))
 	}
 
