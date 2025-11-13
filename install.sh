@@ -123,30 +123,16 @@ echo -n "Installing agent..." >&3
 
     NVML_PATH=""
     if nvidia-smi >/dev/null 2>&1; then
-        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1)
-        echo "NVIDIA driver version: $DRIVER_VERSION" >> "$LOG_FILE"
-        
-        for lib_path in \
-            "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1" \
-            "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so" \
-            "/lib/x86_64-linux-gnu/libnvidia-ml.so.1" \
-            "/usr/lib/libnvidia-ml.so.1" \
-            "/usr/local/lib/libnvidia-ml.so.1"; do
-            if [ -f "$lib_path" ]; then
-                NVML_PATH=$(dirname "$lib_path")
-                echo "Found libnvidia-ml in: $NVML_PATH" >> "$LOG_FILE"
+        for search_dir in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib /usr/local/lib; do
+            if [ -f "$search_dir/libnvidia-ml.so.1" ]; then
+                NVML_PATH="$search_dir"
+                if [ ! -f "$search_dir/libnvidia-ml.so" ]; then
+                    ln -sf "$search_dir/libnvidia-ml.so.1" "$search_dir/libnvidia-ml.so"
+                    echo "Created symlink: $search_dir/libnvidia-ml.so -> libnvidia-ml.so.1" >> "$LOG_FILE"
+                fi
                 break
             fi
         done
-        
-        if [ -z "$NVML_PATH" ]; then
-            echo "Searching for libnvidia-ml..." >> "$LOG_FILE"
-            NVML_LIB=$(find /usr/lib /lib -name "libnvidia-ml.so*" 2>/dev/null | head -n1)
-            if [ -n "$NVML_LIB" ]; then
-                NVML_PATH=$(dirname "$NVML_LIB")
-                echo "Found in: $NVML_PATH" >> "$LOG_FILE"
-            fi
-        fi
     fi
 
     if [ -d "$INSTALL_DIR" ]; then
