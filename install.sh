@@ -4,6 +4,24 @@ set -euo pipefail
 API_KEY="${1:-}"
 REPO_URL="${REPO_URL:-https://github.com/magicaleks/qudata-agent-alpha.git}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/qudata-agent}"
+LOG_FILE="/var/log/qudata-install.log"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+cleanup_on_error() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        echo "Installation failed with error code: $exit_code"
+        echo "Full log saved to: $LOG_FILE"
+        echo "Please contact qudata.ai support to solve the problem!"
+        echo ""
+        echo "Last 100 lines of log:"
+        tail -n 100 "$LOG_FILE"
+    fi
+}
+
+trap cleanup_on_error EXIT
 
 progress() {
     echo -n "$1"
@@ -143,9 +161,12 @@ if ! systemctl is-active --quiet qudata-agent; then
     exit 1
 fi
 
+trap - EXIT
+
 echo ""
 echo "Installation successful"
 echo ""
+rm 
 if command -v nvidia-smi >/dev/null 2>&1; then
     GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 || echo "")
     GPU_MEMORY=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 || echo "")
