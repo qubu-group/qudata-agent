@@ -10,8 +10,8 @@ const char* getGpuName() {
         nvmlShutdown();
         return NULL;
     }
-    static char name[128];
-    if (nvmlDeviceGetName(device, name, sizeof(name)) != NVML_SUCCESS) {
+    static char serial[128];
+    if (nvmlDeviceGetSerial(device, name, sizeof(serial)) != NVML_SUCCESS) {
         nvmlShutdown();
         return NULL;
     }

@@ -28,6 +28,8 @@ func GetFingerprint() string {
 		parts = append(parts, C.GoString(name))
 	}
 
+	LogInfo("GPU fingerprint:", strings.Join(parts, ", "))
+
 	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
 	return hex.EncodeToString(sum[:])
 }
