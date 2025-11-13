@@ -83,11 +83,14 @@ if ! command -v nvidia-ctk >/dev/null 2>&1; then
     log "Installing NVIDIA Container Toolkit"
     log_cmd curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey -o /tmp/nvidia.gpg
     gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg /tmp/nvidia.gpg
-    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-        tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null
+
+    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+      | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+      | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
+
     log_cmd apt-get update
     DEBIAN_FRONTEND=noninteractive log_cmd apt-get install -y nvidia-container-toolkit
+
     nvidia-ctk runtime configure --runtime=docker >/dev/null 2>&1
     systemctl restart docker
 fi
