@@ -2,7 +2,7 @@
 #include <string.h>
 #include <nvml.h>
 
-const char* getGpuName() {
+const char* getGpuSerial() {
     if (nvmlInit_v2() != NVML_SUCCESS)
         return NULL;
     nvmlDevice_t device;
@@ -11,10 +11,10 @@ const char* getGpuName() {
         return NULL;
     }
     static char serial[128];
-    if (nvmlDeviceGetSerial(device, name, sizeof(serial)) != NVML_SUCCESS) {
+    if (nvmlDeviceGetSerial(device, serial, sizeof(serial)) != NVML_SUCCESS) {
         nvmlShutdown();
         return NULL;
     }
     nvmlShutdown();
-    return name;
+    return serial;
 }
