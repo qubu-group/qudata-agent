@@ -121,36 +121,32 @@ echo -n "Installing agent..." >&3
     fi
     export PATH=$PATH:/usr/local/go/bin
 
-    echo "Checking libnvidia-ml" >> "$LOG_FILE"
-    if ! ldconfig -p | grep -q libnvidia-ml.so; then
-        echo "Not found in ldconfig, searching..." >> "$LOG_FILE"
+    NVML_PATH=""
+    if nvidia-smi >/dev/null 2>&1; then
+        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1)
+        echo "NVIDIA driver version: $DRIVER_VERSION" >> "$LOG_FILE"
         
-        NVML_LIB=""
-        for search_path in /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib /lib/x86_64-linux-gnu /lib; do
-            if [ -f "$search_path/libnvidia-ml.so.1" ]; then
-                NVML_LIB="$search_path/libnvidia-ml.so.1"
-                break
-            fi
-            FOUND=$(find "$search_path" -name "libnvidia-ml.so*" 2>/dev/null | head -n1)
-            if [ -n "$FOUND" ]; then
-                NVML_LIB="$FOUND"
+        for lib_path in \
+            "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1" \
+            "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so" \
+            "/lib/x86_64-linux-gnu/libnvidia-ml.so.1" \
+            "/usr/lib/libnvidia-ml.so.1" \
+            "/usr/local/lib/libnvidia-ml.so.1"; do
+            if [ -f "$lib_path" ]; then
+                NVML_PATH=$(dirname "$lib_path")
+                echo "Found libnvidia-ml in: $NVML_PATH" >> "$LOG_FILE"
                 break
             fi
         done
         
-        if [ -n "$NVML_LIB" ]; then
-            echo "Found: $NVML_LIB" >> "$LOG_FILE"
-            TARGET_DIR="/usr/lib/x86_64-linux-gnu"
-            ln -sf "$NVML_LIB" "$TARGET_DIR/libnvidia-ml.so.1" 2>> "$LOG_FILE"
-            ln -sf "$TARGET_DIR/libnvidia-ml.so.1" "$TARGET_DIR/libnvidia-ml.so" 2>> "$LOG_FILE"
-            ldconfig >> "$LOG_FILE" 2>&1
-            echo "Symlinks created in $TARGET_DIR" >> "$LOG_FILE"
-        else
-            echo "WARNING: libnvidia-ml not found, trying package installation" >> "$LOG_FILE"
-            apt-get install -y --reinstall libnvidia-ml-dev >> "$LOG_FILE" 2>&1 || true
+        if [ -z "$NVML_PATH" ]; then
+            echo "Searching for libnvidia-ml..." >> "$LOG_FILE"
+            NVML_LIB=$(find /usr/lib /lib -name "libnvidia-ml.so*" 2>/dev/null | head -n1)
+            if [ -n "$NVML_LIB" ]; then
+                NVML_PATH=$(dirname "$NVML_LIB")
+                echo "Found in: $NVML_PATH" >> "$LOG_FILE"
+            fi
         fi
-    else
-        echo "libnvidia-ml found in ldconfig" >> "$LOG_FILE"
     fi
 
     if [ -d "$INSTALL_DIR" ]; then
@@ -165,11 +161,16 @@ echo -n "Installing agent..." >&3
 
     rm -f /usr/local/bin/qudata-agent
     echo "Compiling agent" >> "$LOG_FILE"
-    echo "Library search paths:" >> "$LOG_FILE"
-    ldconfig -p | grep nvidia-ml >> "$LOG_FILE" 2>&1 || echo "No nvidia-ml found in ldconfig" >> "$LOG_FILE"
-    ls -la /usr/lib/x86_64-linux-gnu/libnvidia-ml* >> "$LOG_FILE" 2>&1 || echo "No libnvidia-ml in /usr/lib/x86_64-linux-gnu" >> "$LOG_FILE"
     
-    CGO_ENABLED=1 CGO_LDFLAGS='-L/usr/lib/x86_64-linux-gnu -L/usr/local/cuda/lib64' go build -o /usr/local/bin/qudata-agent ./cmd/app >> "$LOG_FILE" 2>&1 || exit 1
+    if [ -n "$NVML_PATH" ]; then
+        echo "Using NVML from: $NVML_PATH" >> "$LOG_FILE"
+        CGO_LDFLAGS="-L$NVML_PATH -L/usr/lib/x86_64-linux-gnu"
+    else
+        echo "NVML not found, compiling without GPU support" >> "$LOG_FILE"
+        CGO_LDFLAGS="-L/usr/lib/x86_64-linux-gnu"
+    fi
+    
+    CGO_ENABLED=1 CGO_LDFLAGS="$CGO_LDFLAGS" go build -o /usr/local/bin/qudata-agent ./cmd/app >> "$LOG_FILE" 2>&1 || exit 1
     chmod +x /usr/local/bin/qudata-agent
     
     echo " done" >&3
