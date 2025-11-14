@@ -22,6 +22,7 @@ type InitAgentResponse struct {
 	EmergencyReinit bool   `json:"emergency_reinit"`
 	HostExists      bool   `json:"host_exists"`
 	SecretKey       string `json:"secret_key,omitempty"`
+	InstanceRunning bool   `json:"instance_running"`
 }
 
 type Location struct {
@@ -43,6 +44,7 @@ type CreateHostRequest struct {
 // StatsRequest updates instance stats
 type StatsRequest struct {
 	GPUUtil float64                   `json:"gpu_util"`
+	GPUTemp int                       `json:"gpu_temp"`
 	CPUUtil float64                   `json:"cpu_util"`
 	RAMUtil float64                   `json:"ram_util"`
 	MemUtil float64                   `json:"mem_util"`

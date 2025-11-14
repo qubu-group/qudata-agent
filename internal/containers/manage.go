@@ -46,6 +46,39 @@ func hasGPU() bool {
 	return false
 }
 
+func CleanupDocker() {
+	// Останавливаем и удаляем все контейнеры
+	cmd := exec.Command("docker", "ps", "-aq")
+	output, err := cmd.Output()
+	if err == nil && len(output) > 0 {
+		containerIDs := strings.Split(strings.TrimSpace(string(output)), "\n")
+		for _, containerID := range containerIDs {
+			if containerID != "" {
+				exec.Command("docker", "rm", "-f", containerID).Run()
+			}
+		}
+	}
+
+	// Удаляем все образы
+	cmd = exec.Command("docker", "images", "-q")
+	output, err = cmd.Output()
+	if err == nil && len(output) > 0 {
+		imageIDs := strings.Split(strings.TrimSpace(string(output)), "\n")
+		for _, imageID := range imageIDs {
+			if imageID != "" {
+				exec.Command("docker", "rmi", "-f", imageID).Run()
+			}
+		}
+	}
+
+	// Очищаем глобальные переменные
+	currentContainerID = ""
+	allocatedPorts = nil
+	sshEnabled = false
+	isPulling = false
+	currentImage = ""
+}
+
 func StartInstance(data CreateInstance) error {
 	if currentContainerID != "" || isPulling {
 		return errors.InstanceAlreadyRunningError{}

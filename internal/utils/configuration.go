@@ -105,17 +105,39 @@ func getCPUFreq() float64 {
 	}
 	defer file.Close()
 
+	var maxFreq float64
+	var totalFreq float64
+	var count int
+
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "cpu MHz") {
 			parts := strings.Split(line, ":")
 			if len(parts) >= 2 {
-				mhz, _ := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
-				return mhz / 1000
+				mhz, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+				if err == nil {
+					ghz := mhz / 1000
+					totalFreq += ghz
+					count++
+					if ghz > maxFreq {
+						maxFreq = ghz
+					}
+				}
 			}
 		}
 	}
+
+	// Возвращаем максимальную частоту (boost frequency)
+	if maxFreq > 0 {
+		return maxFreq
+	}
+
+	// Если максимальной нет, возвращаем среднюю
+	if count > 0 {
+		return totalFreq / float64(count)
+	}
+
 	return 0.0
 }
 

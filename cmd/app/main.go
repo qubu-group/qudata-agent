@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/magicaleks/qudata-agent-alpha/internal/containers"
 	"github.com/magicaleks/qudata-agent-alpha/internal/models"
 	"github.com/magicaleks/qudata-agent-alpha/internal/runtime"
 	"github.com/magicaleks/qudata-agent-alpha/internal/server"
@@ -38,6 +39,13 @@ func initAgent(runtime *runtime.Runtime) {
 		storage.SetSecretKey(initResponse.SecretKey)
 		runtime.Client.SetSecret(initResponse.SecretKey)
 	}
+
+	// Если инстанс не запущен - удаляем все Docker контейнеры и образы
+	if !initResponse.InstanceRunning {
+		utils.LogInfo("No instance running, cleaning up Docker resources")
+		containers.CleanupDocker()
+	}
+
 	if !initResponse.HostExists {
 		hostRequest := &models.CreateHostRequest{
 			GPUName:       utils.GetGPUName(),

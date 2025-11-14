@@ -5,32 +5,15 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 var (
 	lastInetIn  int64
 	lastInetOut int64
+	lastNetTime int64
 	netMutex    sync.Mutex
 )
-
-func GetGPUUtil() float64 {
-	cmd := exec.Command("nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits")
-	output, err := cmd.Output()
-	if err != nil {
-		return 0.0
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(lines) == 0 {
-		return 0.0
-	}
-
-	util, err := strconv.ParseFloat(strings.TrimSpace(lines[0]), 64)
-	if err != nil {
-		return 0.0
-	}
-	return util
-}
 
 func GetCPUUtil() float64 {
 	cmd := exec.Command("sh", "-c", "top -bn1 | grep 'Cpu(s)' | sed 's/.*, *\\([0-9.]*\\)%* id.*/\\1/' | awk '{print 100 - $1}'")
@@ -70,25 +53,6 @@ func GetRAMUtil() float64 {
 		}
 	}
 	return 0.0
-}
-
-func GetMemUtil() float64 {
-	cmd := exec.Command("nvidia-smi", "--query-gpu=utilization.memory", "--format=csv,noheader,nounits")
-	output, err := cmd.Output()
-	if err != nil {
-		return 0.0
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(lines) == 0 {
-		return 0.0
-	}
-
-	util, err := strconv.ParseFloat(strings.TrimSpace(lines[0]), 64)
-	if err != nil {
-		return 0.0
-	}
-	return util
 }
 
 func getNetworkBytes() (int64, int64) {
@@ -135,40 +99,56 @@ func GetInetIn() int {
 	netMutex.Lock()
 	defer netMutex.Unlock()
 
-	currentIn, _ := getNetworkBytes()
+	currentIn, currentOut := getNetworkBytes()
+	currentTime := time.Now().UnixMilli()
 
-	if lastInetIn == 0 {
+	if lastInetIn == 0 || lastNetTime == 0 {
 		lastInetIn = currentIn
-		return int(currentIn)
+		lastInetOut = currentOut
+		lastNetTime = currentTime
+		return 0
 	}
 
-	delta := currentIn - lastInetIn
+	deltaBytes := currentIn - lastInetIn
+	deltaTime := currentTime - lastNetTime
+
 	lastInetIn = currentIn
+	lastInetOut = currentOut
+	lastNetTime = currentTime
 
-	if delta < 0 {
-		lastInetIn = currentIn
-		return int(currentIn)
+	if deltaBytes < 0 || deltaTime <= 0 {
+		return 0
 	}
-	return int(delta)
+
+	// Возвращаем байты/сек
+	return int((deltaBytes * 1000) / deltaTime)
 }
 
 func GetInetOut() int {
 	netMutex.Lock()
 	defer netMutex.Unlock()
 
-	_, currentOut := getNetworkBytes()
+	currentIn, currentOut := getNetworkBytes()
+	currentTime := time.Now().UnixMilli()
 
-	if lastInetOut == 0 {
+	if lastInetOut == 0 || lastNetTime == 0 {
+		lastInetIn = currentIn
 		lastInetOut = currentOut
-		return int(currentOut)
+		lastNetTime = currentTime
+		return 0
 	}
 
-	delta := currentOut - lastInetOut
+	deltaBytes := currentOut - lastInetOut
+	deltaTime := currentTime - lastNetTime
+
+	lastInetIn = currentIn
 	lastInetOut = currentOut
+	lastNetTime = currentTime
 
-	if delta < 0 {
-		lastInetOut = currentOut
-		return int(currentOut)
+	if deltaBytes < 0 || deltaTime <= 0 {
+		return 0
 	}
-	return int(delta)
+
+	// Возвращаем байты/сек
+	return int((deltaBytes * 1000) / deltaTime)
 }

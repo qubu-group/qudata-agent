@@ -21,3 +21,15 @@ func GetVRAM() float64 {
 func GetMaxCUDAVersion() float64 {
 	return 12.2
 }
+
+func GetGPUTemperature() int {
+	return 0
+}
+
+func GetGPUUtil() float64 {
+	return 0.0
+}
+
+func GetMemUtil() float64 {
+	return 0.0
+}

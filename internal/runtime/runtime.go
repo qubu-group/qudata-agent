@@ -47,11 +47,13 @@ func (r *Runtime) StatsMonitoring() {
 	for {
 		if containers.InstanceIsRunning() {
 			if i%20 == 0 {
-				utils.LogWarn("Current stats: %s GPU: %s CPU: %s", containers.GetInstanceStatus(), utils.GetGPUUtil(), utils.GetCPUUtil())
+				utils.LogWarn("Current stats: %s GPU: %.1f%% (%d°C) CPU: %.1f%%",
+					containers.GetInstanceStatus(), utils.GetGPUUtil(), utils.GetGPUTemperature(), utils.GetCPUUtil())
 			}
 			i++
 			request = &models.StatsRequest{
 				GPUUtil: utils.GetGPUUtil(),
+				GPUTemp: utils.GetGPUTemperature(),
 				CPUUtil: utils.GetCPUUtil(),
 				RAMUtil: utils.GetRAMUtil(),
 				MemUtil: utils.GetMemUtil(),

@@ -82,3 +82,75 @@ double get_max_cuda_version() {
     
     return (double)major + ((double)minor / 10.0);
 }
+
+int get_gpu_temperature() {
+    nvmlReturn_t result;
+    nvmlDevice_t device;
+    unsigned int temp = 0;
+
+    result = nvmlInit_v2();
+    if (result != NVML_SUCCESS)
+        return -1;
+
+    result = nvmlDeviceGetHandleByIndex_v2(0, &device);
+    if (result != NVML_SUCCESS) {
+        nvmlShutdown();
+        return -1;
+    }
+
+    result = nvmlDeviceGetTemperature(device, NVML_TEMPERATURE_GPU, &temp);
+    nvmlShutdown();
+
+    if (result != NVML_SUCCESS)
+        return -1;
+
+    return (int)temp;
+}
+
+int get_gpu_utilization() {
+    nvmlReturn_t result;
+    nvmlDevice_t device;
+    nvmlUtilization_t utilization;
+
+    result = nvmlInit_v2();
+    if (result != NVML_SUCCESS)
+        return -1;
+
+    result = nvmlDeviceGetHandleByIndex_v2(0, &device);
+    if (result != NVML_SUCCESS) {
+        nvmlShutdown();
+        return -1;
+    }
+
+    result = nvmlDeviceGetUtilizationRates(device, &utilization);
+    nvmlShutdown();
+
+    if (result != NVML_SUCCESS)
+        return -1;
+
+    return (int)utilization.gpu;
+}
+
+int get_gpu_memory_utilization() {
+    nvmlReturn_t result;
+    nvmlDevice_t device;
+    nvmlUtilization_t utilization;
+
+    result = nvmlInit_v2();
+    if (result != NVML_SUCCESS)
+        return -1;
+
+    result = nvmlDeviceGetHandleByIndex_v2(0, &device);
+    if (result != NVML_SUCCESS) {
+        nvmlShutdown();
+        return -1;
+    }
+
+    result = nvmlDeviceGetUtilizationRates(device, &utilization);
+    nvmlShutdown();
+
+    if (result != NVML_SUCCESS)
+        return -1;
+
+    return (int)utilization.memory;
+}
