@@ -151,15 +151,50 @@ func getMemorySpeed() float64 {
 }
 
 func getNetworkSpeed() float64 {
-	interfaces := []string{"eth0", "ens3", "enp0s3"}
-	for _, iface := range interfaces {
-		path := "/sys/class/net/" + iface + "/speed"
-		data, err := os.ReadFile(path)
-		if err == nil {
-			speed, _ := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
-			return speed / 1000
+	entries, err := os.ReadDir("/sys/class/net")
+	if err != nil {
+		return 1.0
+	}
+
+	var maxSpeed float64 = 0
+
+	for _, entry := range entries {
+		ifaceName := entry.Name()
+
+		if ifaceName == "lo" ||
+			strings.HasPrefix(ifaceName, "docker") ||
+			strings.HasPrefix(ifaceName, "veth") ||
+			strings.HasPrefix(ifaceName, "br-") ||
+			strings.HasPrefix(ifaceName, "virbr") {
+			continue
+		}
+
+		operstatePath := "/sys/class/net/" + ifaceName + "/operstate"
+		operstate, err := os.ReadFile(operstatePath)
+		if err != nil || strings.TrimSpace(string(operstate)) != "up" {
+			continue
+		}
+
+		speedPath := "/sys/class/net/" + ifaceName + "/speed"
+		data, err := os.ReadFile(speedPath)
+		if err != nil {
+			continue
+		}
+
+		speed, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
+		if err != nil || speed <= 0 {
+			continue
+		}
+
+		if speed > maxSpeed {
+			maxSpeed = speed
 		}
 	}
+
+	if maxSpeed > 0 {
+		return maxSpeed
+	}
+
 	return 1.0
 }
 
