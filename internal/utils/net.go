@@ -21,11 +21,10 @@ var config *portConfig
 
 func InitNetwork() {
 	portsEnv := os.Getenv("QUDATA_PORTS")
+	LogWarn("Found env QUDATA_PORTS=", portsEnv)
 	if portsEnv == "" {
 		return
 	}
-
-	LogWarn("Found env QUDATA_PORTS=", portsEnv)
 
 	var allPorts []int
 	parts := strings.Split(portsEnv, ",")
