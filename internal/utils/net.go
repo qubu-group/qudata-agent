@@ -25,6 +25,8 @@ func InitNetwork() {
 		return
 	}
 
+	LogWarn("Found env QUDATA_PORTS=", portsEnv)
+
 	var allPorts []int
 	parts := strings.Split(portsEnv, ",")
 
