@@ -19,7 +19,7 @@ type portConfig struct {
 
 var config *portConfig
 
-func init() {
+func InitNetwork() {
 	portsEnv := os.Getenv("QUDATA_PORTS")
 	if portsEnv == "" {
 		return

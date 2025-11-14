@@ -15,6 +15,7 @@ func main() {
 	}
 
 	initAgent(rt)
+	utils.InitNetwork()
 	go rt.StatsMonitoring()
 	s := server.NewServer(rt)
 	s.Run()
