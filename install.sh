@@ -185,10 +185,10 @@ StandardError=journal
 SyslogIdentifier=qudata-agent
 Environment="QUDATA_API_KEY=$API_KEY"
 Environment="QUDATA_SERVICE_URL=https://api.qudata.com"
+Environment="QUDATA_PORTS=$QUDATA_PORTS"
 EOF
 
 if [ -n "${QUDATA_PORTS:-}" ]; then
-    echo "Environment=\"QUDATA_PORTS=$QUDATA_PORTS\"" >> /etc/systemd/system/qudata-agent.service
     log "Port configuration: QUDATA_PORTS=$QUDATA_PORTS"
 else
     log "Port configuration: dynamic allocation (QUDATA_PORTS not set)"
