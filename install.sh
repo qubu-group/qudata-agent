@@ -189,6 +189,9 @@ EOF
 
 if [ -n "${QUDATA_PORTS:-}" ]; then
     echo "Environment=\"QUDATA_PORTS=$QUDATA_PORTS\"" >> /etc/systemd/system/qudata-agent.service
+    log "Port configuration: QUDATA_PORTS=$QUDATA_PORTS"
+else
+    log "Port configuration: dynamic allocation (QUDATA_PORTS not set)"
 fi
 
 cat >> /etc/systemd/system/qudata-agent.service <<EOF

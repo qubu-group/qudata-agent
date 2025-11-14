@@ -21,8 +21,9 @@ var config *portConfig
 
 func InitNetwork() {
 	portsEnv := os.Getenv("QUDATA_PORTS")
-	LogWarn("Found env QUDATA_PORTS=", portsEnv)
+	LogInfo("Initializing network with QUDATA_PORTS='%s'", portsEnv)
 	if portsEnv == "" {
+		LogInfo("QUDATA_PORTS not set, using dynamic port allocation")
 		return
 	}
 

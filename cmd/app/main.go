@@ -9,13 +9,13 @@ import (
 )
 
 func main() {
+	utils.InitNetwork()
 	rt := runtime.NewRuntime()
 	if !rt.Client.Ping() {
 		panic("qudata service is unavailable")
 	}
 
 	initAgent(rt)
-	utils.InitNetwork()
 	go rt.StatsMonitoring()
 	s := server.NewServer(rt)
 	s.Run()
