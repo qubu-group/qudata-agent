@@ -193,7 +193,22 @@ func getCapacity() float64 {
 }
 
 func detectInterfaceSpeed(iface string) float64 {
+	return detectInterfaceSpeedWithVisited(iface, make(map[string]bool))
+}
+
+func detectInterfaceSpeedWithVisited(iface string, visited map[string]bool) float64 {
+	if iface == "" {
+		return 0
+	}
+	if visited[iface] {
+		return 0
+	}
+	visited[iface] = true
+
 	if speed := readInterfaceSpeedFromSysfs(iface); speed > 0 {
+		return speed
+	}
+	if speed := readBondAggregateSpeed(iface, visited); speed > 0 {
 		return speed
 	}
 	if speed := readInterfaceSpeedViaEthtool(iface); speed > 0 {
@@ -287,37 +302,11 @@ func readInterfaceSpeedViaNmcli(iface string) float64 {
 }
 
 func parseSpeedFromText(text string) float64 {
-	lines := strings.Split(text, "\n")
-	for _, line := range lines {
-		if !strings.Contains(strings.ToLower(line), "speed") {
-			continue
-		}
-
-		normalized := strings.ToLower(line)
-		normalized = strings.ReplaceAll(normalized, ":", " ")
-		normalized = strings.ReplaceAll(normalized, "=", " ")
-		fields := strings.Fields(normalized)
-		if len(fields) == 0 {
-			continue
-		}
-
-		for i, field := range fields {
-			if field != "speed" {
-				continue
-			}
-
-			if i+1 >= len(fields) {
-				break
-			}
-
-			value, unit := extractSpeedValue(fields[i+1:])
-			if value > 0 {
-				return convertSpeedToMbps(value, unit)
-			}
-			break
-		}
+	speeds := collectSpeedsFromText(text)
+	if len(speeds) == 0 {
+		return 0
 	}
-	return 0
+	return speeds[0]
 }
 
 func extractSpeedValue(fields []string) (float64, string) {
@@ -404,4 +393,80 @@ func isInterfaceOperational(iface string) bool {
 		}
 	}
 	return false
+}
+
+func readBondAggregateSpeed(iface string, visited map[string]bool) float64 {
+	slavesPath := "/sys/class/net/" + iface + "/bonding/slaves"
+	data, err := os.ReadFile(slavesPath)
+	if err == nil {
+		if total := sumSlaveSpeeds(strings.Fields(string(data)), visited); total > 0 {
+			return total
+		}
+	}
+
+	bondProcPath := "/proc/net/bonding/" + iface
+	procData, err := os.ReadFile(bondProcPath)
+	if err != nil {
+		return 0
+	}
+	return sumSpeedsFromText(string(procData))
+}
+
+func sumSlaveSpeeds(slaves []string, visited map[string]bool) float64 {
+	var total float64
+	for _, slave := range slaves {
+		slave = strings.TrimSpace(slave)
+		if slave == "" {
+			continue
+		}
+		speed := detectInterfaceSpeedWithVisited(slave, visited)
+		if speed > 0 {
+			total += speed
+		}
+	}
+	return total
+}
+
+func sumSpeedsFromText(text string) float64 {
+	speeds := collectSpeedsFromText(text)
+	var total float64
+	for _, speed := range speeds {
+		total += speed
+	}
+	return total
+}
+
+func collectSpeedsFromText(text string) []float64 {
+	var speeds []float64
+	lines := strings.Split(text, "\n")
+	for _, line := range lines {
+		if !strings.Contains(strings.ToLower(line), "speed") {
+			continue
+		}
+
+		normalized := strings.ToLower(line)
+		normalized = strings.ReplaceAll(normalized, ":", " ")
+		normalized = strings.ReplaceAll(normalized, "=", " ")
+		fields := strings.Fields(normalized)
+		if len(fields) == 0 {
+			continue
+		}
+
+		for i, field := range fields {
+			if field != "speed" {
+				continue
+			}
+
+			if i+1 >= len(fields) {
+				break
+			}
+
+			value, unit := extractSpeedValue(fields[i+1:])
+			if value > 0 {
+				speeds = append(speeds, convertSpeedToMbps(value, unit))
+			}
+			break
+		}
+	}
+	return speeds
 }
