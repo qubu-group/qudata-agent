@@ -153,6 +153,7 @@ func getMemorySpeed() float64 {
 func getNetworkSpeed() float64 {
 	entries, err := os.ReadDir("/sys/class/net")
 	if err != nil {
+		LogWarn("Failed to read /sys/class/net")
 		return 1.0
 	}
 
@@ -178,11 +179,13 @@ func getNetworkSpeed() float64 {
 		speedPath := "/sys/class/net/" + ifaceName + "/speed"
 		data, err := os.ReadFile(speedPath)
 		if err != nil {
+			LogWarn("Failed to read /sys/class/net/" + ifaceName + "/speed")
 			continue
 		}
 
 		speed, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
 		if err != nil || speed <= 0 {
+			LogWarn("Failed to parse /sys/class/net/" + ifaceName + "/speed")
 			continue
 		}
 
