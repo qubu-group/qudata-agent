@@ -2,11 +2,14 @@ package utils
 
 import (
 	"bufio"
+	"context"
 	"os"
+	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type UnitValue struct {
@@ -157,38 +160,19 @@ func getNetworkSpeed() float64 {
 		return 1.0
 	}
 
-	var maxSpeed float64 = 0
+	var maxSpeed float64
 
 	for _, entry := range entries {
-		ifaceName := entry.Name()
-
-		if ifaceName == "lo" ||
-			strings.HasPrefix(ifaceName, "docker") ||
-			strings.HasPrefix(ifaceName, "veth") ||
-			strings.HasPrefix(ifaceName, "br-") ||
-			strings.HasPrefix(ifaceName, "virbr") {
+		iface := entry.Name()
+		if !isInterfaceCandidate(iface) {
 			continue
 		}
 
-		operstatePath := "/sys/class/net/" + ifaceName + "/operstate"
-		operstate, err := os.ReadFile(operstatePath)
-		if err != nil || strings.TrimSpace(string(operstate)) != "up" {
+		if !isInterfaceOperational(iface) {
 			continue
 		}
 
-		speedPath := "/sys/class/net/" + ifaceName + "/speed"
-		data, err := os.ReadFile(speedPath)
-		if err != nil {
-			LogWarn("Failed to read /sys/class/net/" + ifaceName + "/speed")
-			continue
-		}
-
-		speed, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
-		if err != nil || speed <= 0 {
-			LogWarn("Failed to parse /sys/class/net/" + ifaceName + "/speed")
-			continue
-		}
-
+		speed := detectInterfaceSpeed(iface)
 		if speed > maxSpeed {
 			maxSpeed = speed
 		}
@@ -206,4 +190,218 @@ func getCapacity() float64 {
 	cpuFreq := getCPUFreq()
 	ram := getRAM().Amount
 	return (cpuCores * cpuFreq * ram) / 100
+}
+
+func detectInterfaceSpeed(iface string) float64 {
+	if speed := readInterfaceSpeedFromSysfs(iface); speed > 0 {
+		return speed
+	}
+	if speed := readInterfaceSpeedViaEthtool(iface); speed > 0 {
+		return speed
+	}
+	if speed := readInterfaceSpeedViaNetworkctl(iface); speed > 0 {
+		return speed
+	}
+	if speed := readInterfaceSpeedViaNmcli(iface); speed > 0 {
+		return speed
+	}
+	return 0
+}
+
+func readInterfaceSpeedFromSysfs(iface string) float64 {
+	speedPath := "/sys/class/net/" + iface + "/speed"
+	data, err := os.ReadFile(speedPath)
+	if err != nil {
+		return 0
+	}
+
+	value := strings.TrimSpace(string(data))
+	if value == "" {
+		return 0
+	}
+
+	if value == "-1" || strings.Contains(strings.ToLower(value), "unknown") {
+		return 0
+	}
+
+	speed, err := strconv.ParseFloat(value, 64)
+	if err != nil || speed <= 0 {
+		return 0
+	}
+	return speed
+}
+
+func readInterfaceSpeedViaEthtool(iface string) float64 {
+	binary, err := exec.LookPath("ethtool")
+	if err != nil {
+		return 0
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	output, err := exec.CommandContext(ctx, binary, iface).CombinedOutput()
+	if err != nil && len(output) == 0 {
+		return 0
+	}
+
+	speed := parseSpeedFromText(string(output))
+	if speed <= 0 && err != nil {
+		LogWarn("ethtool %s failed: %v", iface, err)
+	}
+	return speed
+}
+
+func readInterfaceSpeedViaNetworkctl(iface string) float64 {
+	binary, err := exec.LookPath("networkctl")
+	if err != nil {
+		return 0
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	output, err := exec.CommandContext(ctx, binary, "status", iface, "--no-pager").CombinedOutput()
+	if err != nil && len(output) == 0 {
+		return 0
+	}
+
+	return parseSpeedFromText(string(output))
+}
+
+func readInterfaceSpeedViaNmcli(iface string) float64 {
+	binary, err := exec.LookPath("nmcli")
+	if err != nil {
+		return 0
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	output, err := exec.CommandContext(ctx, binary, "device", "show", iface).CombinedOutput()
+	if err != nil && len(output) == 0 {
+		return 0
+	}
+
+	return parseSpeedFromText(string(output))
+}
+
+func parseSpeedFromText(text string) float64 {
+	lines := strings.Split(text, "\n")
+	for _, line := range lines {
+		if !strings.Contains(strings.ToLower(line), "speed") {
+			continue
+		}
+
+		normalized := strings.ToLower(line)
+		normalized = strings.ReplaceAll(normalized, ":", " ")
+		normalized = strings.ReplaceAll(normalized, "=", " ")
+		fields := strings.Fields(normalized)
+		if len(fields) == 0 {
+			continue
+		}
+
+		for i, field := range fields {
+			if field != "speed" {
+				continue
+			}
+
+			if i+1 >= len(fields) {
+				break
+			}
+
+			value, unit := extractSpeedValue(fields[i+1:])
+			if value > 0 {
+				return convertSpeedToMbps(value, unit)
+			}
+			break
+		}
+	}
+	return 0
+}
+
+func extractSpeedValue(fields []string) (float64, string) {
+	if len(fields) == 0 {
+		return 0, ""
+	}
+
+	valueStr := strings.Trim(fields[0], "()")
+	valueStr = strings.TrimSuffix(valueStr, ",")
+	valueStr = strings.TrimSuffix(valueStr, ";")
+
+	// Handle variants like "3000mb/s"
+	unit := ""
+	for _, suffix := range []string{"gbit/s", "gb/s", "gigabit", "mb/s", "mib/s", "mibit/s", "kbit/s", "kb/s"} {
+		if strings.HasSuffix(valueStr, suffix) {
+			unit = suffix
+			valueStr = strings.TrimSpace(strings.TrimSuffix(valueStr, suffix))
+			break
+		}
+	}
+
+	value, err := strconv.ParseFloat(valueStr, 64)
+	if err != nil || value <= 0 {
+		return 0, ""
+	}
+
+	if unit == "" && len(fields) > 1 {
+		unit = fields[1]
+	}
+
+	return value, unit
+}
+
+func convertSpeedToMbps(value float64, unit string) float64 {
+	unit = strings.ToLower(unit)
+	switch {
+	case strings.HasPrefix(unit, "g"):
+		return value * 1000
+	case strings.HasPrefix(unit, "m"):
+		return value
+	case strings.HasPrefix(unit, "k"):
+		return value / 1000
+	default:
+		// No unit provided, assume Mbps
+		return value
+	}
+}
+
+func isInterfaceCandidate(iface string) bool {
+	if iface == "" || iface == "lo" {
+		return false
+	}
+
+	virtualPrefixes := []string{
+		"docker", "veth", "br-", "virbr", "tap", "tun", "wg", "tailscale",
+		"zt", "vmnet", "lo:", "vlan", "macvtap", "macvlan",
+	}
+
+	for _, prefix := range virtualPrefixes {
+		if strings.HasPrefix(iface, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
+func isInterfaceOperational(iface string) bool {
+	operstatePath := "/sys/class/net/" + iface + "/operstate"
+	operstate, err := os.ReadFile(operstatePath)
+	if err != nil {
+		return false
+	}
+
+	state := strings.TrimSpace(strings.ToLower(string(operstate)))
+	if state == "up" {
+		return true
+	}
+
+	if state == "unknown" {
+		carrierPath := "/sys/class/net/" + iface + "/carrier"
+		carrier, err := os.ReadFile(carrierPath)
+		if err == nil && strings.TrimSpace(string(carrier)) == "1" {
+			return true
+		}
+	}
+	return false
 }
