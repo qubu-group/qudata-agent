@@ -7,22 +7,21 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/qudata-agent}"
 LOG_FILE="/var/log/qudata-install.log"
 
 rm -f "$LOG_FILE"
-exec 3>&1
 
 log() {
-    echo "$@" | tee -a "$LOG_FILE" >&3
+    echo "$@" | tee -a "$LOG_FILE"
 }
 
 log_cmd() {
     local msg="$1"
     shift
-    echo -n "$msg..." >&3
+    echo -n "$msg..."
     if "$@" >>"$LOG_FILE" 2>&1; then
-        echo " done" >&3
+        echo " done"
         return 0
     else
         local status=$?
-        echo " failed" >&3
+        echo " failed"
         return $status
     fi
 }
@@ -30,14 +29,14 @@ log_cmd() {
 cleanup_on_error() {
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
-        echo "" >&3
-        echo "Installation failed with error code: $exit_code" >&3
-        echo "Full log saved to: $LOG_FILE" >&3
-        echo "Please contact qudata.ai support to solve the problem!" >&3
-        echo "" >&3
+        echo ""
+        echo "Installation failed with error code: $exit_code"
+        echo "Full log saved to: $LOG_FILE"
+        echo "Please contact qudata.ai support to solve the problem!"
+        echo ""
         if [ -f "$LOG_FILE" ]; then
-            echo "Last 50 lines of log:" >&3
-            tail -n 50 "$LOG_FILE" >&3
+            echo "Last 50 lines of log:"
+            tail -n 50 "$LOG_FILE"
         fi
     fi
 }
@@ -126,8 +125,7 @@ else
     log "DEBUG MODE: Skipping NVIDIA Container Toolkit installation"
 fi
 
-echo -n "Installing agent..." >&3
-
+echo -n "Installing agent..."
 {
     GO_VERSION="1.23.4"
     if ! command -v go >/dev/null 2>&1; then
@@ -188,9 +186,9 @@ echo -n "Installing agent..." >&3
     CGO_ENABLED=1 CGO_LDFLAGS="$CGO_LDFLAGS" go build -o /usr/local/bin/qudata-agent ./cmd/app >> "$LOG_FILE" 2>&1 || exit 1
     chmod +x /usr/local/bin/qudata-agent
     
-    echo " done" >&3
+    echo " done"
 } || {
-    echo " failed" >&3
+    echo " failed"
     exit 1
 }
 
@@ -248,24 +246,24 @@ fi
 
 trap - EXIT
 
-echo "" >&3
-echo "Installation successful" >&3
-echo "" >&3
+echo ""
+echo "Installation successful"
+echo ""
 
 rm -f "$LOG_FILE"
 
 if [ "${QUDATA_AGENT_DEBUG:-false}" = "true" ]; then
-    echo "DEBUG MODE: Agent will use mock GPU (H100, 70 VRAM)" >&3
+    echo "DEBUG MODE: Agent will use mock GPU (H100, 70 VRAM)"
 elif command -v nvidia-smi >/dev/null 2>&1; then
     GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 || echo "")
     GPU_MEMORY=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 || echo "")
     GPU_DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 || echo "")
     
     if [ -n "$GPU_NAME" ] && [ -n "$GPU_MEMORY" ]; then
-        echo "GPU: $GPU_NAME" >&3
-        echo "VRAM: ${GPU_MEMORY} MB" >&3
+        echo "GPU: $GPU_NAME"
+        echo "VRAM: ${GPU_MEMORY} MB"
         if [ -n "$GPU_DRIVER" ]; then
-            echo "Driver: $GPU_DRIVER" >&3
+            echo "Driver: $GPU_DRIVER"
         fi
     fi
 fi
