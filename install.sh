@@ -7,22 +7,21 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/qudata-agent}"
 LOG_FILE="/var/log/qudata-install.log"
 
 rm -f "$LOG_FILE"
-exec 3>&1
 
 log() {
-    echo "$@" | tee -a "$LOG_FILE" >&3
+    echo "$@" | tee -a "$LOG_FILE"
 }
 
 log_cmd() {
     local msg="$1"
     shift
-    echo -n "$msg..." >&3
+    echo -n "$msg..."
     if "$@" >>"$LOG_FILE" 2>&1; then
-        echo " done" >&3
+        echo " done"
         return 0
     else
         local status=$?
-        echo " failed" >&3
+        echo " failed"
         return $status
     fi
 }
@@ -30,14 +29,14 @@ log_cmd() {
 cleanup_on_error() {
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
-        echo "" >&3
-        echo "Installation failed with error code: $exit_code" >&3
-        echo "Full log saved to: $LOG_FILE" >&3
-        echo "Please contact qudata.ai support to solve the problem!" >&3
-        echo "" >&3
+        echo ""
+        echo "Installation failed with error code: $exit_code"
+        echo "Full log saved to: $LOG_FILE"
+        echo "Please contact qudata.ai support to solve the problem!"
+        echo ""
         if [ -f "$LOG_FILE" ]; then
-            echo "Last 50 lines of log:" >&3
-            tail -n 50 "$LOG_FILE" >&3
+            echo "Last 50 lines of log:"
+            tail -n 50 "$LOG_FILE"
         fi
     fi
 }
@@ -64,20 +63,38 @@ rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list 2>/dev/null || true
 
 log "Installing system dependencies"
 log_cmd "Updating package lists" apt-get update
-log_cmd "Installing packages" env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    build-essential \
-    git \
-    curl \
-    wget \
-    ca-certificates \
-    gnupg \
-    lsb-release \
-    libnvidia-ml-dev \
-    cryptsetup \
-    cryptsetup-bin \
-    dmsetup \
-    apparmor \
-    apparmor-utils
+
+if [ "${QUDATA_AGENT_DEBUG:-false}" = "true" ]; then
+    log "DEBUG MODE: Installing base packages without NVIDIA dependencies"
+    log_cmd "Installing packages" env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        build-essential \
+        git \
+        curl \
+        wget \
+        ca-certificates \
+        gnupg \
+        lsb-release \
+        cryptsetup \
+        cryptsetup-bin \
+        dmsetup \
+        apparmor \
+        apparmor-utils
+else
+    log_cmd "Installing packages" env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        build-essential \
+        git \
+        curl \
+        wget \
+        ca-certificates \
+        gnupg \
+        lsb-release \
+        libnvidia-ml-dev \
+        cryptsetup \
+        cryptsetup-bin \
+        dmsetup \
+        apparmor \
+        apparmor-utils
+fi
 
 if ! command -v docker >/dev/null 2>&1; then
     log "Installing Docker"
@@ -91,21 +108,24 @@ if ! command -v docker >/dev/null 2>&1; then
     systemctl start docker
 fi
 
-if ! command -v nvidia-ctk >/dev/null 2>&1; then
-    log "Installing NVIDIA Container Toolkit"
-    log_cmd "Downloading GPG key" curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey -o /tmp/nvidia.gpg
-    gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg /tmp/nvidia.gpg 2>>"$LOG_FILE"
-    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
-      | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-      | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >> "$LOG_FILE"
-    log_cmd "Updating package lists" apt-get update
-    log_cmd "Installing toolkit" env DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-container-toolkit
-    nvidia-ctk runtime configure --runtime=docker >>"$LOG_FILE" 2>&1
-    systemctl restart docker
+if [ "${QUDATA_AGENT_DEBUG:-false}" != "true" ]; then
+    if ! command -v nvidia-ctk >/dev/null 2>&1; then
+        log "Installing NVIDIA Container Toolkit"
+        log_cmd "Downloading GPG key" curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey -o /tmp/nvidia.gpg
+        gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg /tmp/nvidia.gpg 2>>"$LOG_FILE"
+        curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+          | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+          | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >> "$LOG_FILE"
+        log_cmd "Updating package lists" apt-get update
+        log_cmd "Installing toolkit" env DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-container-toolkit
+        nvidia-ctk runtime configure --runtime=docker >>"$LOG_FILE" 2>&1
+        systemctl restart docker
+    fi
+else
+    log "DEBUG MODE: Skipping NVIDIA Container Toolkit installation"
 fi
 
-echo -n "Installing agent..." >&3
-
+echo -n "Installing agent..."
 {
     GO_VERSION="1.23.4"
     if ! command -v go >/dev/null 2>&1; then
@@ -122,17 +142,21 @@ echo -n "Installing agent..." >&3
     export PATH=$PATH:/usr/local/go/bin
 
     NVML_PATH=""
-    if nvidia-smi >/dev/null 2>&1; then
-        for search_dir in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib /usr/local/lib; do
-            if [ -f "$search_dir/libnvidia-ml.so.1" ]; then
-                NVML_PATH="$search_dir"
-                if [ ! -f "$search_dir/libnvidia-ml.so" ]; then
-                    ln -sf "$search_dir/libnvidia-ml.so.1" "$search_dir/libnvidia-ml.so"
-                    echo "Created symlink: $search_dir/libnvidia-ml.so -> libnvidia-ml.so.1" >> "$LOG_FILE"
+    if [ "${QUDATA_AGENT_DEBUG:-false}" != "true" ]; then
+        if nvidia-smi >/dev/null 2>&1; then
+            for search_dir in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib /usr/local/lib; do
+                if [ -f "$search_dir/libnvidia-ml.so.1" ]; then
+                    NVML_PATH="$search_dir"
+                    if [ ! -f "$search_dir/libnvidia-ml.so" ]; then
+                        ln -sf "$search_dir/libnvidia-ml.so.1" "$search_dir/libnvidia-ml.so"
+                        echo "Created symlink: $search_dir/libnvidia-ml.so -> libnvidia-ml.so.1" >> "$LOG_FILE"
+                    fi
+                    break
                 fi
-                break
-            fi
-        done
+            done
+        fi
+    else
+        echo "DEBUG MODE: Skipping NVML search" >> "$LOG_FILE"
     fi
 
     if [ -d "$INSTALL_DIR" ]; then
@@ -148,7 +172,10 @@ echo -n "Installing agent..." >&3
     rm -f /usr/local/bin/qudata-agent
     echo "Compiling agent" >> "$LOG_FILE"
     
-    if [ -n "$NVML_PATH" ]; then
+    if [ "${QUDATA_AGENT_DEBUG:-false}" = "true" ]; then
+        echo "DEBUG MODE: Compiling without GPU support (using mocks)" >> "$LOG_FILE"
+        CGO_LDFLAGS="-L/usr/lib/x86_64-linux-gnu"
+    elif [ -n "$NVML_PATH" ]; then
         echo "Using NVML from: $NVML_PATH" >> "$LOG_FILE"
         CGO_LDFLAGS="-L$NVML_PATH -L/usr/lib/x86_64-linux-gnu"
     else
@@ -159,9 +186,9 @@ echo -n "Installing agent..." >&3
     CGO_ENABLED=1 CGO_LDFLAGS="$CGO_LDFLAGS" go build -o /usr/local/bin/qudata-agent ./cmd/app >> "$LOG_FILE" 2>&1 || exit 1
     chmod +x /usr/local/bin/qudata-agent
     
-    echo " done" >&3
+    echo " done"
 } || {
-    echo " failed" >&3
+    echo " failed"
     exit 1
 }
 
@@ -186,6 +213,11 @@ SyslogIdentifier=qudata-agent
 Environment="QUDATA_API_KEY=$API_KEY"
 Environment="QUDATA_SERVICE_URL=https://api.qudata.com"
 EOF
+
+if [ "${QUDATA_AGENT_DEBUG:-false}" = "true" ]; then
+    echo "Environment=\"QUDATA_AGENT_DEBUG=true\"" >> /etc/systemd/system/qudata-agent.service
+    log "DEBUG MODE enabled for agent runtime"
+fi
 
 if [ -n "${QUDATA_PORTS:-}" ]; then
     echo "Environment=\"QUDATA_PORTS=$QUDATA_PORTS\"" >> /etc/systemd/system/qudata-agent.service
@@ -214,22 +246,24 @@ fi
 
 trap - EXIT
 
-echo "" >&3
-echo "Installation successful" >&3
-echo "" >&3
+echo ""
+echo "Installation successful"
+echo ""
 
 rm -f "$LOG_FILE"
 
-if command -v nvidia-smi >/dev/null 2>&1; then
+if [ "${QUDATA_AGENT_DEBUG:-false}" = "true" ]; then
+    echo "DEBUG MODE: Agent will use mock GPU (H100, 70 VRAM)"
+elif command -v nvidia-smi >/dev/null 2>&1; then
     GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 || echo "")
     GPU_MEMORY=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 || echo "")
     GPU_DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 || echo "")
     
     if [ -n "$GPU_NAME" ] && [ -n "$GPU_MEMORY" ]; then
-        echo "GPU: $GPU_NAME" >&3
-        echo "VRAM: ${GPU_MEMORY} MB" >&3
+        echo "GPU: $GPU_NAME"
+        echo "VRAM: ${GPU_MEMORY} MB"
         if [ -n "$GPU_DRIVER" ]; then
-            echo "Driver: $GPU_DRIVER" >&3
+            echo "Driver: $GPU_DRIVER"
         fi
     fi
 fi
