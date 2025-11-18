@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+
 	"github.com/magicaleks/qudata-agent-alpha/internal/containers"
 	"github.com/magicaleks/qudata-agent-alpha/internal/models"
 	"github.com/magicaleks/qudata-agent-alpha/internal/runtime"
@@ -47,12 +49,17 @@ func initAgent(runtime *runtime.Runtime) {
 	}
 
 	if !initResponse.HostExists {
+		// Используем безопасные обертки, которые автоматически учитывают QUDATA_AGENT_DEBUG
 		hostRequest := &models.CreateHostRequest{
-			GPUName:       utils.GetGPUName(),
-			GPUAmount:     utils.GetGPUCount(),
-			VRAM:          utils.GetVRAM(),
-			MaxCUDA:       utils.GetMaxCUDAVersion(),
+			GPUName:       utils.GetGPUNameSafe(),
+			GPUAmount:     utils.GetGPUCountSafe(),
+			VRAM:          utils.GetVRAMSafe(),
+			MaxCUDA:       utils.GetMaxCUDAVersionSafe(),
 			Configuration: utils.GetConfiguration(),
+		}
+
+		if os.Getenv("QUDATA_AGENT_DEBUG") == "true" {
+			utils.LogInfo("DEBUG MODE: using mock GPU data")
 		}
 		utils.LogInfo("creating host: %s (CUDA %.1f)", hostRequest.GPUName, hostRequest.MaxCUDA)
 		runtime.Client.CreateHost(hostRequest)

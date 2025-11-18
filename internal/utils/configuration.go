@@ -41,7 +41,7 @@ func GetConfiguration() ConfigurationData {
 		EthernetIn:  getNetworkSpeed(),
 		EthernetOut: getNetworkSpeed(),
 		Capacity:    getCapacity(),
-		MaxCUDAVer:  GetMaxCUDAVersion(),
+		MaxCUDAVer:  GetMaxCUDAVersionSafe(),
 	}
 }
 
