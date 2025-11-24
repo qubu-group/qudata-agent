@@ -1,19 +1,20 @@
 package main
 
 import (
-	"github.com/magicaleks/qudata-agent-alpha/internal/security"
-	"github.com/magicaleks/qudata-agent-alpha/internal/utils"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/magicaleks/qudata-agent-alpha/internal/infra/logger"
+	"github.com/magicaleks/qudata-agent-alpha/internal/infra/security"
 )
 
 func main() {
 	monitor := security.NewSecurityMonitor()
 
 	monitor.SetAlertHandler(func(e security.MonitorEvent) {
-		utils.Log(e.Level, "security monitor: %s - %s", e.Source, e.Message)
+		logger.Log(e.Level, "security monitor: %s - %s", e.Source, e.Message)
 	})
 
 	monitor.Start()
@@ -24,6 +25,6 @@ func main() {
 
 	monitor.Stop()
 
-	utils.LogInfo("security monitor stopped")
+	logger.LogInfo("security monitor stopped")
 	time.Sleep(time.Second)
 }
