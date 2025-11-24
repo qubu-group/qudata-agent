@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/hashicorp/go-retryablehttp"
@@ -23,23 +22,21 @@ const (
 )
 
 type Client struct {
-	apiKey    string
-	secretKey string
-	http      *retryablehttp.Client
+	apiKey      string
+	secretKey   string
+	http        *retryablehttp.Client
+	initialized bool
 }
 
-func NewClient(secret string) *Client {
-	apiKey := os.Getenv("QUDATA_API_KEY")
-	if secret == "" {
-		if apiKey == "" || !strings.HasPrefix(apiKey, "ak-") {
-			panic("QUDATA_API_KEY is not defined or invalid")
-		}
+func NewClient(apiKey string) *Client {
+	if apiKey == "" || !strings.HasPrefix(apiKey, "ak-") {
+		panic("QUDATA_API_KEY is not defined or invalid")
 	}
 
 	return &Client{
-		apiKey:    apiKey,
-		secretKey: secret,
-		http:      retryablehttp.NewClient(),
+		apiKey:      apiKey,
+		http:        retryablehttp.NewClient(),
+		initialized: false,
 	}
 }
 
@@ -68,6 +65,7 @@ func (c *Client) InitAgent(ctx context.Context, req domain.InitAgentRequest) (*d
 	if !data.Ok || data.Data == nil {
 		return nil, errors.New("empty init response")
 	}
+	c.initialized = true
 	return data.Data, nil
 }
 
@@ -127,11 +125,10 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (*http.R
 	req = req.WithContext(ctx)
 	req.Header.Set("Content-Type", applicationJSON)
 
-	if c.apiKey != "" {
-		req.Header.Set(apiKeyHeader, c.apiKey)
-	}
-	if c.secretKey != "" {
+	if c.initialized {
 		req.Header.Set(secretKeyHeader, c.secretKey)
+	} else {
+		req.Header.Set(apiKeyHeader, c.apiKey)
 	}
 	return c.http.Do(req)
 }

@@ -45,21 +45,17 @@ func NewApplication(ctx context.Context) (*Application, error) {
 	env := systeminfra.NewProbe(allocator)
 	statsCollector := systeminfra.NewStatsCollector()
 	store := storage.NewFilesystemAgentStore()
-	if apiKey := strings.TrimSpace(os.Getenv("QUDATA_API_KEY")); apiKey != "" {
+	apiKey := strings.TrimSpace(os.Getenv("QUDATA_API_KEY"))
+	if apiKey != "" {
 		if err := store.SaveAPIKey(ctx, apiKey); err != nil {
 			log.Warn("failed to store api key: %v", err)
 		}
+	} else {
+		log.Error("no qudata api key provided; pls follow docs.qudata.ai tutorial")
+		panic("no qudata api key provided; pls follow docs.qudata.ai")
 	}
 
-	secret, err := store.Secret(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	client := qudata.NewClient(secret)
-	if secret != "" {
-		client.UseSecret(secret)
-	}
+	client := qudata.NewClient(apiKey)
 
 	dockerManager := docker.NewManager()
 	savedState, _ := state.LoadInstanceState()
