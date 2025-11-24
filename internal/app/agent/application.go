@@ -50,9 +50,6 @@ func NewApplication(ctx context.Context) (*Application, error) {
 		if err := store.SaveAPIKey(ctx, apiKey); err != nil {
 			log.Warn("failed to store api key: %v", err)
 		}
-	} else {
-		log.Error("no qudata api key provided; pls follow docs.qudata.ai tutorial")
-		panic("no qudata api key provided; pls follow docs.qudata.ai")
 	}
 
 	client := qudata.NewClient(apiKey)
@@ -68,7 +65,7 @@ func NewApplication(ctx context.Context) (*Application, error) {
 	statsPublisher := statsuc.NewPublisher(statsCollector, client, dockerManager, log, 500*time.Millisecond)
 	updater := maintenance.NewUpdater(store, log)
 
-	api := httpserver.NewAPI(instanceSvc, updater)
+	api := httpserver.NewAPI(instanceSvc, updater, log)
 
 	return &Application{
 		agentSvc: agentSvc,
@@ -107,7 +104,7 @@ func (a *Application) Run(ctx context.Context) error {
 		secret = "agent_secret"
 	}
 
-	server := httpserver.NewServer(meta.Port, a.api, secret)
+	server := httpserver.NewServer(meta.Port, a.api, secret, a.logger)
 	a.logger.Info("server starting on %s", fmt.Sprintf("0.0.0.0:%d", meta.Port))
 
 	return server.Run()

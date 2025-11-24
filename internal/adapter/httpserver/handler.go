@@ -2,9 +2,11 @@ package httpserver
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/magicaleks/qudata-agent-alpha/internal/domain"
+	"github.com/magicaleks/qudata-agent-alpha/internal/impls"
 	instanceuc "github.com/magicaleks/qudata-agent-alpha/internal/usecase/instance"
 	"github.com/magicaleks/qudata-agent-alpha/internal/usecase/maintenance"
 )
@@ -48,10 +50,11 @@ type instanceStatusResponse struct {
 type API struct {
 	instances *instanceuc.Service
 	updater   *maintenance.Updater
+	logger    impls.Logger
 }
 
-func NewAPI(instances *instanceuc.Service, updater *maintenance.Updater) *API {
-	return &API{instances: instances, updater: updater}
+func NewAPI(instances *instanceuc.Service, updater *maintenance.Updater, logger impls.Logger) *API {
+	return &API{instances: instances, updater: updater, logger: logger}
 }
 
 func (a *API) RegisterRoutes(router *gin.Engine) {
@@ -77,7 +80,15 @@ func (a *API) instanceStatus(c *gin.Context) {
 func (a *API) createInstance(c *gin.Context) {
 	var req createInstanceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		a.logger.Warn("create instance: invalid payload: %v", err)
 		c.JSON(http.StatusBadRequest, response{Ok: false, Error: err.Error()})
+		return
+	}
+
+	if strings.TrimSpace(req.TunnelToken) == "" {
+		msg := "tunnel_token is required"
+		a.logger.Warn("create instance: %s", msg)
+		c.JSON(http.StatusBadRequest, response{Ok: false, Error: msg})
 		return
 	}
 
@@ -97,6 +108,7 @@ func (a *API) createInstance(c *gin.Context) {
 
 	ports, err := a.instances.Create(c.Request.Context(), input)
 	if err != nil {
+		a.logger.Error("create instance failed: %v", err)
 		c.JSON(http.StatusInternalServerError, response{Ok: false, Error: err.Error()})
 		return
 	}
@@ -107,12 +119,14 @@ func (a *API) createInstance(c *gin.Context) {
 func (a *API) manageInstance(c *gin.Context) {
 	var req manageInstanceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		a.logger.Warn("manage instance: invalid payload: %v", err)
 		c.JSON(http.StatusBadRequest, response{Ok: false, Error: err.Error()})
 		return
 	}
 
 	cmd := parseCommand(req.Command)
 	if cmd == domain.CommandUnknown {
+		a.logger.Warn("manage instance: unknown command %s", req.Command)
 		c.JSON(http.StatusBadRequest, response{Ok: false, Error: "unknown command"})
 		return
 	}
@@ -124,6 +138,7 @@ func (a *API) manageInstance(c *gin.Context) {
 		err = a.instances.Manage(c.Request.Context(), cmd)
 	}
 	if err != nil {
+		a.logger.Error("manage instance failed: %v", err)
 		c.JSON(http.StatusInternalServerError, response{Ok: false, Error: err.Error()})
 		return
 	}
@@ -133,6 +148,7 @@ func (a *API) manageInstance(c *gin.Context) {
 
 func (a *API) deleteInstance(c *gin.Context) {
 	if err := a.instances.Delete(c.Request.Context()); err != nil {
+		a.logger.Error("delete instance failed: %v", err)
 		c.JSON(http.StatusInternalServerError, response{Ok: false, Error: err.Error()})
 		return
 	}
@@ -142,10 +158,12 @@ func (a *API) deleteInstance(c *gin.Context) {
 func (a *API) addSSH(c *gin.Context) {
 	var req sshKeyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		a.logger.Warn("add ssh: invalid payload: %v", err)
 		c.JSON(http.StatusBadRequest, response{Ok: false, Error: err.Error()})
 		return
 	}
 	if err := a.instances.AddSSH(c.Request.Context(), req.SSHPubKey); err != nil {
+		a.logger.Error("add ssh failed: %v", err)
 		c.JSON(http.StatusInternalServerError, response{Ok: false, Error: err.Error()})
 		return
 	}
@@ -155,10 +173,12 @@ func (a *API) addSSH(c *gin.Context) {
 func (a *API) removeSSH(c *gin.Context) {
 	var req sshKeyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		a.logger.Warn("remove ssh: invalid payload: %v", err)
 		c.JSON(http.StatusBadRequest, response{Ok: false, Error: err.Error()})
 		return
 	}
 	if err := a.instances.RemoveSSH(c.Request.Context(), req.SSHPubKey); err != nil {
+		a.logger.Error("remove ssh failed: %v", err)
 		c.JSON(http.StatusInternalServerError, response{Ok: false, Error: err.Error()})
 		return
 	}
@@ -167,6 +187,7 @@ func (a *API) removeSSH(c *gin.Context) {
 
 func (a *API) selfUpdate(c *gin.Context) {
 	if err := a.updater.Run(c.Request.Context()); err != nil {
+		a.logger.Error("self-update failed: %v", err)
 		c.JSON(http.StatusInternalServerError, response{Ok: false, Error: err.Error()})
 		return
 	}

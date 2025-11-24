@@ -40,13 +40,16 @@ func (p *Publisher) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			status := p.instances.Status(ctx)
+			if !p.instances.IsRunning(ctx) {
+				continue
+			}
+
 			snapshot := p.collector.Collect()
-			snapshot.Status = status
+			snapshot.Status = p.instances.Status(ctx)
 
 			if counter%20 == 0 {
 				p.logger.Warn("Current stats: %s GPU: %.1f%% (%d°C) CPU: %.1f%%",
-					status, snapshot.GPUUtil, snapshot.GPUTemp, snapshot.CPUUtil)
+					snapshot.Status, snapshot.GPUUtil, snapshot.GPUTemp, snapshot.CPUUtil)
 			}
 			counter++
 

@@ -6,17 +6,18 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/magicaleks/qudata-agent-alpha/internal/impls"
 )
 
 type Server struct {
 	http *http.Server
 }
 
-func NewServer(port int, api *API, secret string) *Server {
+func NewServer(port int, api *API, secret string, logger impls.Logger) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
-	router.Use(gin.Recovery())
-	router.Use(authMiddleware(secret))
+	router.Use(gin.Recovery(), requestLogger(logger), authMiddleware(secret))
+	router.Use(gin.CustomRecovery(requestRecoveryWithLog(logger)))
 	api.RegisterRoutes(router)
 
 	s := &http.Server{
