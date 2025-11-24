@@ -16,6 +16,7 @@ type InitAgentRequest struct {
 	Address     string `json:"address"`
 	Fingerprint string `json:"fingerprint"`
 	PID         int    `json:"pid"`
+	Version     string `json:"version"`
 }
 
 // InitAgentResponse отражает состояние агента на стороне сервиса.

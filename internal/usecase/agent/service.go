@@ -15,15 +15,17 @@ type Service struct {
 	api       impls.AgentService
 	instances impls.InstanceRepository
 	logger    impls.Logger
+	version   string
 }
 
-func NewService(store impls.AgentStore, env impls.EnvironmentProbe, api impls.AgentService, instances impls.InstanceRepository, logger impls.Logger) *Service {
+func NewService(store impls.AgentStore, env impls.EnvironmentProbe, api impls.AgentService, instances impls.InstanceRepository, version string, logger impls.Logger) *Service {
 	return &Service{
 		store:     store,
 		env:       env,
 		api:       api,
 		instances: instances,
 		logger:    logger,
+		version:   version,
 	}
 }
 
@@ -56,6 +58,7 @@ func (s *Service) Bootstrap(ctx context.Context) (*domain.AgentMetadata, bool, e
 		Address:     metadata.Address,
 		Fingerprint: metadata.Fingerprint,
 		PID:         metadata.PID,
+		Version:     s.version,
 	})
 	if err != nil {
 		return nil, false, err

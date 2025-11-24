@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/magicaleks/qudata-agent-alpha/internal/adapter/httpserver"
+	appversion "github.com/magicaleks/qudata-agent-alpha/internal/app/version"
 	"github.com/magicaleks/qudata-agent-alpha/internal/infra/docker"
 	"github.com/magicaleks/qudata-agent-alpha/internal/infra/logger"
 	"github.com/magicaleks/qudata-agent-alpha/internal/infra/network"
@@ -20,6 +21,10 @@ import (
 	instanceuc "github.com/magicaleks/qudata-agent-alpha/internal/usecase/instance"
 	"github.com/magicaleks/qudata-agent-alpha/internal/usecase/maintenance"
 	statsuc "github.com/magicaleks/qudata-agent-alpha/internal/usecase/stats"
+)
+
+const (
+	AgentVersion = "a0.0.2"
 )
 
 type Application struct {
@@ -63,7 +68,7 @@ func NewApplication(ctx context.Context) (*Application, error) {
 	tunnelManager := tunnel.NewManager(log)
 
 	instanceSvc := instanceuc.NewService(ctx, dockerManager, env, allocator, tunnelManager, log)
-	agentSvc := agentuc.NewService(store, env, client, dockerManager, log)
+	agentSvc := agentuc.NewService(store, env, client, dockerManager, appversion.AgentVersion, log)
 	statsPublisher := statsuc.NewPublisher(statsCollector, client, dockerManager, log, 500*time.Millisecond)
 	updater := maintenance.NewUpdater(store, log)
 
