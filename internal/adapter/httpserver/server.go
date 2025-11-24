@@ -16,7 +16,7 @@ type Server struct {
 func NewServer(port int, api *API, secret string, logger impls.Logger) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
-	router.Use(gin.Recovery(), requestLogger(logger), authMiddleware(secret))
+	router.Use(gin.Recovery(), authMiddleware(secret))
 	router.Use(gin.CustomRecovery(requestRecoveryWithLog(logger)))
 	api.RegisterRoutes(router)
 

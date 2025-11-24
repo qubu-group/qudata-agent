@@ -139,28 +139,37 @@ func (a *Allocator) allocateFromConfig(count int) ([]int, error) {
 		return nil, fmt.Errorf("custom port configuration is empty")
 	}
 
-	var available []int
-	checked := 0
+	total := len(a.cfg.instancePorts)
+	available := make([]int, 0, count)
+	attempts := 0
+	idx := a.cfg.nextPortIndex % total
 
-	for i := a.cfg.nextPortIndex; i < len(a.cfg.instancePorts) && len(available) < count; i++ {
-		port := a.cfg.instancePorts[i]
-		checked++
+	for attempts < total && len(available) < count {
+		port := a.cfg.instancePorts[idx]
+		attempts++
 		if isPortAvailable(port) {
 			available = append(available, port)
 		}
+		idx = (idx + 1) % total
 	}
 
-	a.cfg.nextPortIndex += checked
+	a.cfg.nextPortIndex = idx
 
 	if len(available) == 0 {
-		return nil, fmt.Errorf("no available impls in configured range (checked %d)", checked)
+		return nil, fmt.Errorf("no available ports in configured range (checked %d)", attempts)
 	}
 
 	if len(available) < count {
-		a.logger.Warn("requested %d impls, allocated %d", count, len(available))
+		remaining := count - len(available)
+		dynamic, err := a.allocateDynamically(remaining)
+		if err != nil {
+			a.logger.Warn("requested %d ports, allocated %d from config", count, len(available))
+			return nil, err
+		}
+		available = append(available, dynamic...)
 	}
 
-	a.logger.Info("Allocated %d custom impls starting from %d", len(available), available[0])
+	a.logger.Info("Allocated %d custom ports starting from %d", len(available), available[0])
 	return available, nil
 }
 
@@ -187,7 +196,7 @@ func (a *Allocator) allocateDynamically(count int) ([]int, error) {
 			return ports, nil
 		}
 	}
-	return nil, fmt.Errorf("failed to allocate %d impls dynamically", count)
+	return nil, fmt.Errorf("failed to allocate %d ports dynamically", count)
 }
 
 func isPortAvailable(port int) bool {
