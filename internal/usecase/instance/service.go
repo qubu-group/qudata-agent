@@ -54,12 +54,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (domain.Instanc
 		return nil, fmt.Errorf("tunnel token is required")
 	}
 
-	image := strings.TrimSpace(input.Image)
-	if image == "" {
-		image = "ubuntu:22.04"
-	} else if input.ImageTag != "" && !strings.Contains(image, ":") {
-		image += ":" + input.ImageTag
-	}
+	image := normalizeImage(input.Image, input.ImageTag)
 
 	allocatedPorts := make(domain.InstancePorts)
 	if len(input.Ports) > 0 {
@@ -124,4 +119,20 @@ func (s *Service) AddSSH(ctx context.Context, key string) error {
 
 func (s *Service) RemoveSSH(ctx context.Context, key string) error {
 	return s.repo.RemoveSSH(ctx, key)
+}
+
+func normalizeImage(image, tag string) string {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		image = "ubuntu:22.04"
+	}
+	if tag == "" {
+		return image
+	}
+	lastSlash := strings.LastIndex(image, "/")
+	lastColon := strings.LastIndex(image, ":")
+	if lastColon > lastSlash {
+		image = image[:lastColon]
+	}
+	return image + ":" + tag
 }

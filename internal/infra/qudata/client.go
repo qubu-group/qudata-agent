@@ -85,6 +85,7 @@ func (c *Client) SendStats(ctx context.Context, stats domain.StatsSnapshot) erro
 }
 
 func (c *Client) UseSecret(secret string) {
+	secret = strings.TrimSpace(secret)
 	if secret == "" || !strings.HasPrefix(secret, "sk-") {
 		panic("invalid secret key")
 	}

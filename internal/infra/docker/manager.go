@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -173,6 +174,10 @@ func startInstance(spec domain.InstanceSpec) (string, error) {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		currentImage = ""
+		msg := strings.TrimSpace(string(output))
+		if msg != "" {
+			err = fmt.Errorf("%w: %s", err, msg)
+		}
 		return "", err
 	}
 
