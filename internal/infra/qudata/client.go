@@ -22,10 +22,9 @@ const (
 )
 
 type Client struct {
-	apiKey      string
-	secretKey   string
-	http        *retryablehttp.Client
-	initialized bool
+	apiKey    string
+	secretKey string
+	http      *retryablehttp.Client
 }
 
 func NewClient(apiKey string) *Client {
@@ -34,9 +33,8 @@ func NewClient(apiKey string) *Client {
 	}
 
 	return &Client{
-		apiKey:      apiKey,
-		http:        retryablehttp.NewClient(),
-		initialized: false,
+		apiKey: apiKey,
+		http:   retryablehttp.NewClient(),
 	}
 }
 
@@ -65,7 +63,6 @@ func (c *Client) InitAgent(ctx context.Context, req domain.InitAgentRequest) (*d
 	if !data.Ok || data.Data == nil {
 		return nil, errors.New("empty init response")
 	}
-	c.initialized = true
 	return data.Data, nil
 }
 
@@ -92,7 +89,6 @@ func (c *Client) UseSecret(secret string) {
 		panic("invalid secret key")
 	}
 	c.secretKey = secret
-	c.apiKey = ""
 }
 
 type apiResponse[T any] struct {
@@ -125,7 +121,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (*http.R
 	req = req.WithContext(ctx)
 	req.Header.Set("Content-Type", applicationJSON)
 
-	if c.initialized {
+	if c.secretKey != "" {
 		req.Header.Set(secretKeyHeader, c.secretKey)
 	} else {
 		req.Header.Set(apiKeyHeader, c.apiKey)

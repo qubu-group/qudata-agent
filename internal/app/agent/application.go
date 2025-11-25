@@ -53,6 +53,13 @@ func NewApplication(ctx context.Context) (*Application, error) {
 	}
 
 	client := qudata.NewClient(apiKey)
+	secret, err := store.Secret(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if secret != "" {
+		client.UseSecret(secret)
+	}
 
 	dockerManager := docker.NewManager()
 	savedState, _ := state.LoadInstanceState()
