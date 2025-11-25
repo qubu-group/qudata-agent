@@ -35,6 +35,11 @@ func (s *Service) Bootstrap(ctx context.Context) (*domain.AgentMetadata, bool, e
 		return nil, false, err
 	}
 
+	storedSecret, err := s.store.Secret(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+
 	port, err := s.env.AgentPort()
 	if err != nil {
 		return nil, false, err
@@ -67,11 +72,14 @@ func (s *Service) Bootstrap(ctx context.Context) (*domain.AgentMetadata, bool, e
 		return nil, false, errors.New("empty init response")
 	}
 
-	if initResp.SecretKey != "" {
+	switch {
+	case initResp.SecretKey != "":
 		if err := s.store.SaveSecret(ctx, initResp.SecretKey); err != nil {
 			return nil, false, err
 		}
 		s.api.UseSecret(initResp.SecretKey)
+	case storedSecret != "":
+		s.api.UseSecret(storedSecret)
 	}
 
 	if !initResp.InstanceRunning {
