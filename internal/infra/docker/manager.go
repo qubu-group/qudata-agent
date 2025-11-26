@@ -9,6 +9,7 @@ import (
 
 	"github.com/magicaleks/qudata-agent-alpha/internal/domain"
 	domainerrors "github.com/magicaleks/qudata-agent-alpha/internal/domain/errors"
+	"github.com/magicaleks/qudata-agent-alpha/internal/impls"
 	"github.com/magicaleks/qudata-agent-alpha/internal/infra/state"
 )
 
@@ -20,10 +21,12 @@ var (
 	currentImage       string
 )
 
-type Manager struct{}
+type Manager struct {
+	logger impls.Logger
+}
 
-func NewManager() *Manager {
-	return &Manager{}
+func NewManager(logger impls.Logger) *Manager {
+	return &Manager{logger: logger}
 }
 
 func (m *Manager) Create(_ context.Context, spec domain.InstanceSpec) (string, error) {
@@ -31,7 +34,7 @@ func (m *Manager) Create(_ context.Context, spec domain.InstanceSpec) (string, e
 		return "", domainerrors.InstanceAlreadyRunningError{}
 	}
 
-	return startInstance(spec)
+	return m.startInstance(spec)
 }
 
 func (m *Manager) Manage(_ context.Context, cmd domain.InstanceCommand) error {
@@ -112,7 +115,7 @@ func (m *Manager) RestoreState(saved *state.InstanceState) {
 	allocatedPorts = saved.Ports
 }
 
-func startInstance(spec domain.InstanceSpec) (string, error) {
+func (m *Manager) startInstance(spec domain.InstanceSpec) (string, error) {
 	isPulling = true
 	defer func() { isPulling = false }()
 
@@ -128,9 +131,10 @@ func startInstance(spec domain.InstanceSpec) (string, error) {
 	currentImage = image
 
 	pullCmd := exec.Command("docker", "pull", image)
-	if err := pullCmd.Run(); err != nil {
+	if output, err := pullCmd.CombinedOutput(); err != nil {
 		currentImage = ""
-		return "", err
+		m.logCommandError(fmt.Sprintf("docker pull %s", image), output, err)
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 	}
 
 	mountPoint := "/var/lib/qudata/data"
@@ -174,6 +178,7 @@ func startInstance(spec domain.InstanceSpec) (string, error) {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		currentImage = ""
+		m.logCommandError(strings.Join(cmd.Args, " "), output, err)
 		msg := strings.TrimSpace(string(output))
 		if msg != "" {
 			err = fmt.Errorf("%w: %s", err, msg)
@@ -228,4 +233,16 @@ func hasGPU() bool {
 		}
 	}
 	return false
+}
+
+func (m *Manager) logCommandError(command string, output []byte, err error) {
+	if m.logger == nil {
+		return
+	}
+	msg := strings.TrimSpace(string(output))
+	if msg == "" {
+		m.logger.Error("command %s failed: %v", command, err)
+		return
+	}
+	m.logger.Error("command %s failed: %v | output: %s", command, err, msg)
 }

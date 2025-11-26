@@ -54,7 +54,7 @@ func NewApplication(ctx context.Context) (*Application, error) {
 
 	client := qudata.NewClient(apiKey)
 
-	dockerManager := docker.NewManager()
+	dockerManager := docker.NewManager(log)
 	savedState, _ := state.LoadInstanceState()
 	dockerManager.RestoreState(savedState)
 
