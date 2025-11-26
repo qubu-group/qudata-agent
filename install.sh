@@ -2,7 +2,7 @@
 set -euo pipefail
 
 API_KEY="${1:-}"
-REPO_URL="${REPO_URL:-https://github.com/magicaleks/qudata-agent-alpha.git}"
+REPO_URL="${REPO_URL:-https://github.com/qubu-group/qudata-agent.git}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/qudata-agent}"
 LOG_FILE="/var/log/qudata-install.log"
 
