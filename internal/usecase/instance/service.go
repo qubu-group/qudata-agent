@@ -54,7 +54,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (domain.Instanc
 		return nil, fmt.Errorf("tunnel token is required")
 	}
 
-	image := normalizeImage(input.Image, input.ImageTag)
+	image := s.normalizeImage(input.Image, input.ImageTag)
 
 	allocatedPorts := make(domain.InstancePorts)
 	if len(input.Ports) > 0 {
@@ -88,15 +88,9 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (domain.Instanc
 		TunnelToken: input.TunnelToken,
 	}
 
-	containerID, err := s.repo.Create(ctx, spec)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := s.tunnels.Configure(s.ctx, containerID, input.TunnelToken, allocatedPorts); err != nil {
-		_ = s.repo.Stop(ctx)
-		return nil, err
-	}
+	portsSnapshot := clonePorts(allocatedPorts)
+	specSnapshot := cloneSpec(spec)
+	go s.startAsync(specSnapshot, portsSnapshot, input.TunnelToken, input.Image, input.ImageTag)
 
 	s.logger.Info("Instance creation requested for image %s", image)
 	return allocatedPorts, nil
@@ -121,18 +115,60 @@ func (s *Service) RemoveSSH(ctx context.Context, key string) error {
 	return s.repo.RemoveSSH(ctx, key)
 }
 
-func normalizeImage(image, tag string) string {
+func (s *Service) startAsync(spec domain.InstanceSpec, ports domain.InstancePorts, token, requestedImage, requestedTag string) {
+	containerID, err := s.repo.Create(s.ctx, spec)
+	if err != nil {
+		s.logger.Error("instance start failed (image=%s tag=%s ports=%v): %v",
+			requestedImage, requestedTag, ports, err)
+		_ = s.tunnels.Clear()
+		return
+	}
+
+	if err := s.tunnels.Configure(s.ctx, containerID, token, ports); err != nil {
+		s.logger.Error("tunnel configure failed for container %s: %v", containerID, err)
+		_ = s.repo.Stop(s.ctx)
+		_ = s.tunnels.Clear()
+		return
+	}
+
+	s.logger.Info("Instance %s started successfully", containerID)
+}
+
+func (s *Service) normalizeImage(image, tag string) string {
 	image = strings.TrimSpace(image)
 	if image == "" {
 		image = "ubuntu:22.04"
 	}
-	if tag == "" {
-		return image
-	}
 	lastSlash := strings.LastIndex(image, "/")
 	lastColon := strings.LastIndex(image, ":")
-	if lastColon > lastSlash {
-		image = image[:lastColon]
+
+	if tag == "" || lastColon > lastSlash {
+		if tag != "" && lastColon > lastSlash {
+			s.logger.Warn("image %s already contains tag, ignoring provided tag=%s", image, tag)
+		}
+		return image
 	}
+
 	return image + ":" + tag
+}
+
+func clonePorts(src domain.InstancePorts) domain.InstancePorts {
+	if src == nil {
+		return nil
+	}
+	dst := make(domain.InstancePorts, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func cloneSpec(src domain.InstanceSpec) domain.InstanceSpec {
+	dst := src
+	dst.EnvVars = make(map[string]string, len(src.EnvVars))
+	for k, v := range src.EnvVars {
+		dst.EnvVars[k] = v
+	}
+	dst.Ports = clonePorts(src.Ports)
+	return dst
 }
