@@ -66,7 +66,7 @@ log_cmd "Updating package lists" apt-get update
 
 if [ "${QUDATA_AGENT_DEBUG:-false}" = "true" ]; then
     log "DEBUG MODE: Installing base packages without NVIDIA dependencies"
-    log_cmd "Installing packages" env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    log_cmd "Installing packages" env DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades \
         build-essential \
         git \
         curl \
@@ -80,7 +80,7 @@ if [ "${QUDATA_AGENT_DEBUG:-false}" = "true" ]; then
         apparmor \
         apparmor-utils
 else
-    log_cmd "Installing packages" env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    log_cmd "Installing packages" env DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades \
         build-essential \
         git \
         curl \
