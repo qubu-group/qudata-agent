@@ -548,6 +548,71 @@ def _ssh_cmd(port, key_path, remote_cmd):
     ]
 
 
+GPU_INFO_PATH = DATA_DIR / "gpu-info.json"
+
+
+def _save_gpu_info(ssh_port, ssh_key):
+    """Query full GPU info from VM and save to JSON for agent use."""
+    try:
+        # name, memory (MiB), driver, cuda version
+        r = run(
+            _ssh_cmd(ssh_port, ssh_key,
+                     "nvidia-smi --query-gpu=name,memory.total,driver_version "
+                     "--format=csv,noheader,nounits"),
+            check=False,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return
+
+        # Parse: "Tesla T4, 15360, 535.261.03"
+        parts = [p.strip() for p in r.stdout.strip().splitlines()[0].split(",")]
+        if len(parts) < 3:
+            return
+        name = parts[0]
+        vram_mib = float(parts[1])
+        driver = parts[2]
+
+        # Get CUDA version from nvidia-smi header
+        cuda_ver = 0.0
+        r2 = run(
+            _ssh_cmd(ssh_port, ssh_key, "nvidia-smi"),
+            check=False,
+        )
+        if r2.returncode == 0:
+            for line in r2.stdout.splitlines():
+                if "CUDA Version" in line:
+                    import re as _re
+                    m = _re.search(r"CUDA Version:\s*([0-9.]+)", line)
+                    if m:
+                        cuda_ver = float(m.group(1))
+                    break
+
+        # Count GPUs
+        r3 = run(
+            _ssh_cmd(ssh_port, ssh_key,
+                     "nvidia-smi --query-gpu=name --format=csv,noheader | wc -l"),
+            check=False,
+        )
+        count = 1
+        if r3.returncode == 0 and r3.stdout.strip().isdigit():
+            count = int(r3.stdout.strip())
+
+        info = {
+            "name": name,
+            "count": count,
+            "vram_gb": round(vram_mib / 1024, 1),
+            "max_cuda": cuda_ver,
+            "driver_version": driver,
+        }
+
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        GPU_INFO_PATH.write_text(json.dumps(info, indent=2))
+        print(f"  + GPU info saved: {info['name']}, {info['vram_gb']} GB, CUDA {cuda_ver}")
+
+    except Exception as e:
+        print(f"  ! Warning: could not save GPU info: {e}")
+
+
 def test_gpu_passthrough(gpu_addr):
     """Boot a test VM with GPU passthrough, verify nvidia-smi, tear down."""
     print("\n-> Testing GPU passthrough")
@@ -679,7 +744,8 @@ def test_gpu_passthrough(gpu_addr):
             print("  + SSH ready, checking nvidia-smi")
             r = run(
                 _ssh_cmd(ssh_port, ssh_key,
-                         "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader"),
+                         "nvidia-smi --query-gpu=name,memory.total,driver_version "
+                         "--format=csv,noheader,nounits"),
                 check=False,
             )
 
@@ -687,6 +753,7 @@ def test_gpu_passthrough(gpu_addr):
             if r.returncode == 0 and r.stdout.strip():
                 print(f"  + GPU in VM: {r.stdout.strip().splitlines()[0]}")
                 success = True
+                _save_gpu_info(ssh_port, ssh_key)
             else:
                 print("  ! nvidia-smi failed inside VM")
                 if r.stdout:

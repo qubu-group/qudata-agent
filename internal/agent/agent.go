@@ -106,9 +106,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		if a.cfg.Debug {
 			gpuProvider = gpu.MockInfoProvider{}
 		} else {
-			gpuProvider = &gpu.HostInfoProvider{
-				Metrics: gpu.NewMetrics(a.cfg.Debug, a.logger),
-			}
+			gpuInfoPath := a.cfg.DataDir + "/gpu-info.json"
+			gpuProvider = &gpu.FileInfoProvider{Path: gpuInfoPath}
 		}
 		probe := system.NewProbe(gpuProvider)
 		hostReq := probe.HostRegistration(ctx)
