@@ -86,33 +86,25 @@ func (s *Store) Secret() (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-// SaveFRPInfo persists the FRP connection details received from the API.
-func (s *Store) SaveFRPInfo(frp *domain.FRPInfo) error {
+// SaveSecretDomain persists the secret domain received from the API.
+func (s *Store) SaveSecretDomain(domain string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	data, err := json.Marshal(frp)
-	if err != nil {
-		return fmt.Errorf("marshal frp info: %w", err)
-	}
-	return os.WriteFile(filepath.Join(s.dataDir, "frp_info.json"), data, 0o600)
+	return os.WriteFile(filepath.Join(s.dataDir, "secret_domain"), []byte(domain), 0o600)
 }
 
-// FRPInfo loads persisted FRP connection details.
-func (s *Store) FRPInfo() (*domain.FRPInfo, error) {
+// SecretDomain loads the persisted secret domain.
+func (s *Store) SecretDomain() (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	data, err := os.ReadFile(filepath.Join(s.dataDir, "frp_info.json"))
+	data, err := os.ReadFile(filepath.Join(s.dataDir, "secret_domain"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return "", nil
 		}
-		return nil, err
+		return "", err
 	}
-	var frp domain.FRPInfo
-	if err := json.Unmarshal(data, &frp); err != nil {
-		return nil, fmt.Errorf("unmarshal frp info: %w", err)
-	}
-	return &frp, nil
+	return strings.TrimSpace(string(data)), nil
 }
 
 // SaveInstanceState persists the running instance state.

@@ -136,15 +136,24 @@ func (h *Handler) startInstance(ctx context.Context, spec domain.InstanceSpec, h
 		return
 	}
 
-	frpProxies := frpc.BuildInstanceProxies(spec, hostPorts, sshRemotePort)
-	if err := h.frpc.UpdateInstanceProxies(frpProxies); err != nil {
+	// Build port specs for FRPC proxy generation.
+	var portSpecs []frpc.PortSpec
+	for _, pm := range spec.Ports {
+		portSpecs = append(portSpecs, frpc.PortSpec{
+			GuestPort:  pm.GuestPort,
+			RemotePort: pm.RemotePort,
+			Proto:      pm.Proto,
+		})
+	}
+
+	proxies := frpc.BuildInstanceProxies(spec.SecretDomain, hostPorts, sshRemotePort, spec.SSHEnabled, portSpecs)
+	if err := h.frpc.UpdateInstanceProxies(proxies); err != nil {
 		h.logger.Error("failed to update frpc proxies", "err", err)
 	}
 
 	state := &domain.InstanceState{
 		VMID:         h.vm.VMID(),
 		Ports:        portMap,
-		FRPProxies:   frpProxies,
 		SSHEnabled:   spec.SSHEnabled,
 		GPUAddr:      spec.GPUAddr,
 		SecretDomain: spec.SecretDomain,

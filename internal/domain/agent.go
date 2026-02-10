@@ -15,33 +15,26 @@ type InitAgentResponse struct {
 }
 
 type InitAgentRespData struct {
-	AgentCreated    bool     `json:"agent_created"`
-	EmergencyReinit bool     `json:"emergency_reinit"`
-	HostExists      bool     `json:"host_exists"`
-	SecretKey       string   `json:"secret_key"`
-	InstanceRunning bool     `json:"instance_running"`
-	FRP             *FRPInfo `json:"frp,omitempty"`
-}
-
-type FRPInfo struct {
-	ServerAddr string `json:"server_addr"`
-	ServerPort int    `json:"server_port"`
-	Token      string `json:"token"`
-	Subdomain  string `json:"subdomain"`
+	AgentCreated    bool   `json:"agent_created"`
+	EmergencyReinit bool   `json:"emergency_reinit"`
+	HostExists      bool   `json:"host_exists"`
+	SecretKey       string `json:"secret_key"`
+	SecretDomain    string `json:"secret_domain"`
+	InstanceRunning bool   `json:"instance_running"`
 }
 
 type AgentMetadata struct {
-	ID         string
-	Port       int
-	Address    string
-	SecretKey  string
-	FRP        *FRPInfo
-	HostExists bool
+	ID           string
+	Port         int
+	Address      string
+	SecretKey    string
+	SecretDomain string
+	HostExists   bool
 }
 
 func (m *AgentMetadata) Subdomain() string {
-	if m != nil && m.FRP != nil {
-		return m.FRP.Subdomain
+	if m != nil {
+		return m.SecretDomain
 	}
 	return ""
 }

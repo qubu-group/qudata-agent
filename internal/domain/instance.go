@@ -42,16 +42,7 @@ type InstancePorts map[string]string
 type InstanceState struct {
 	VMID         string        `json:"vm_id"`
 	Ports        InstancePorts `json:"ports"`
-	FRPProxies   []FRPProxy    `json:"frp_proxies"`
 	SSHEnabled   bool          `json:"ssh_enabled"`
 	GPUAddr      string        `json:"gpu_addr"`
 	SecretDomain string        `json:"secret_domain"`
-}
-
-type FRPProxy struct {
-	Name         string `json:"name"`
-	Type         string `json:"type"`
-	LocalPort    int    `json:"local_port"`
-	RemotePort   int    `json:"remote_port,omitempty"`
-	CustomDomain string `json:"custom_domain,omitempty"`
 }

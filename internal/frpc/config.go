@@ -4,14 +4,20 @@ import (
 	"bytes"
 	"fmt"
 	"text/template"
+)
 
-	"github.com/qudata/agent/internal/domain"
+const (
+	FRPServerAddr = "agent.ru1.qudata.ai"
+	FRPServerPort = 7000
+	FRPToken      = "dd9915115e84def1436eade2687a66b7c0f1f54715eb16d2985745e0f4d0af79"
+	DomainSuffix  = ".ru1.qudata.ai"
 )
 
 type Config struct {
-	ServerAddr      string
-	ServerPort      int
-	AuthToken       string
+	ServerAddr string
+	ServerPort int
+	AuthToken  string
+
 	AgentProxy      *Proxy
 	InstanceProxies []Proxy
 }
@@ -32,19 +38,20 @@ serverPort = {{ .ServerPort }}
 method = "token"
 token = "{{ .AuthToken }}"
 
+[log]
+to = "console"
+level = "debug"
+
 {{- if .AgentProxy }}
 
 [[proxies]]
 name = "{{ .AgentProxy.Name }}"
 type = "{{ .AgentProxy.Type }}"
-{{- if eq .AgentProxy.Type "http" }}
+{{- if .AgentProxy.CustomDomain }}
 customDomains = ["{{ .AgentProxy.CustomDomain }}"]
 {{- end }}
 localIP = "{{ .AgentProxy.LocalIP }}"
 localPort = {{ .AgentProxy.LocalPort }}
-{{- if and (eq .AgentProxy.Type "tcp") (gt .AgentProxy.RemotePort 0) }}
-remotePort = {{ .AgentProxy.RemotePort }}
-{{- end }}
 {{- end }}
 
 {{- range .InstanceProxies }}
@@ -52,7 +59,7 @@ remotePort = {{ .AgentProxy.RemotePort }}
 [[proxies]]
 name = "{{ .Name }}"
 type = "{{ .Type }}"
-{{- if eq .Type "http" }}
+{{- if .CustomDomain }}
 customDomains = ["{{ .CustomDomain }}"]
 {{- end }}
 localIP = "{{ .LocalIP }}"
@@ -63,38 +70,33 @@ remotePort = {{ .RemotePort }}
 {{- end }}
 `))
 
-func NewConfig(frp *domain.FRPInfo, agentPort int) *Config {
+// NewConfig builds the FRPC config from hardcoded server params + dynamic agent info.
+func NewConfig(agentID, secretDomain string, agentPort int) *Config {
 	return &Config{
-		ServerAddr: frp.ServerAddr,
-		ServerPort: frp.ServerPort,
-		AuthToken:  frp.Token,
+		ServerAddr: FRPServerAddr,
+		ServerPort: FRPServerPort,
+		AuthToken:  FRPToken,
 		AgentProxy: &Proxy{
-			Name:         "agent-api",
+			Name:         fmt.Sprintf("agent-%s", agentID),
 			Type:         "http",
 			LocalIP:      "127.0.0.1",
 			LocalPort:    agentPort,
-			CustomDomain: frp.Subdomain,
+			CustomDomain: fmt.Sprintf("%s%s:%d", secretDomain, DomainSuffix, agentPort),
 		},
 	}
 }
 
-func (c *Config) AddInstanceProxies(proxies []domain.FRPProxy) {
-	for _, p := range proxies {
-		c.InstanceProxies = append(c.InstanceProxies, Proxy{
-			Name:         p.Name,
-			Type:         p.Type,
-			LocalIP:      "127.0.0.1",
-			LocalPort:    p.LocalPort,
-			RemotePort:   p.RemotePort,
-			CustomDomain: p.CustomDomain,
-		})
-	}
+// AddInstanceProxy appends a single instance proxy.
+func (c *Config) AddInstanceProxy(p Proxy) {
+	c.InstanceProxies = append(c.InstanceProxies, p)
 }
 
+// ClearInstanceProxies removes all instance proxies.
 func (c *Config) ClearInstanceProxies() {
 	c.InstanceProxies = nil
 }
 
+// Render writes the FRPC TOML config.
 func (c *Config) Render() ([]byte, error) {
 	var buf bytes.Buffer
 	if err := configTemplate.Execute(&buf, c); err != nil {
@@ -104,39 +106,42 @@ func (c *Config) Render() ([]byte, error) {
 }
 
 // BuildInstanceProxies creates FRP proxy entries for a VM instance.
-// SSH gets a TCP proxy with remotePort from the SSH range (10000-15000).
-// Application ports get HTTP proxies with customDomains = ["secretDomain:remotePort"].
-func BuildInstanceProxies(spec domain.InstanceSpec, hostPorts []int, sshRemotePort int) []domain.FRPProxy {
-	var proxies []domain.FRPProxy
+// SSH: TCP proxy with remotePort from the SSH range (10000-15000).
+// App ports: HTTP proxies with customDomains = ["<secret_domain>.ru1.qudata.ai:<remotePort>"].
+func BuildInstanceProxies(secretDomain string, hostPorts []int, sshRemotePort int, sshEnabled bool, ports []PortSpec) []Proxy {
+	var proxies []Proxy
 	idx := 0
 
-	if spec.SSHEnabled && idx < len(hostPorts) {
-		proxies = append(proxies, domain.FRPProxy{
+	if sshEnabled && idx < len(hostPorts) {
+		proxies = append(proxies, Proxy{
 			Name:       "vm-ssh",
 			Type:       "tcp",
+			LocalIP:    "127.0.0.1",
 			LocalPort:  hostPorts[idx],
 			RemotePort: sshRemotePort,
 		})
 		idx++
 	}
 
-	for _, pm := range spec.Ports {
+	fullDomain := secretDomain + DomainSuffix
+	for _, ps := range ports {
 		if idx >= len(hostPorts) {
 			break
 		}
-		proxy := domain.FRPProxy{
-			Name:      fmt.Sprintf("vm-%s-%d", pm.Proto, pm.GuestPort),
-			Type:      pm.Proto,
+		proxy := Proxy{
+			Name:      fmt.Sprintf("vm-%s-%d", ps.Proto, ps.GuestPort),
+			Type:      ps.Proto,
+			LocalIP:   "127.0.0.1",
 			LocalPort: hostPorts[idx],
 		}
-		switch pm.Proto {
+		switch ps.Proto {
 		case "tcp":
-			proxy.RemotePort = pm.RemotePort
+			proxy.RemotePort = ps.RemotePort
 		case "http":
-			if pm.RemotePort > 0 {
-				proxy.CustomDomain = fmt.Sprintf("%s:%d", spec.SecretDomain, pm.RemotePort)
+			if ps.RemotePort > 0 {
+				proxy.CustomDomain = fmt.Sprintf("%s:%d", fullDomain, ps.RemotePort)
 			} else {
-				proxy.CustomDomain = spec.SecretDomain
+				proxy.CustomDomain = fullDomain
 			}
 		}
 		proxies = append(proxies, proxy)
@@ -144,4 +149,11 @@ func BuildInstanceProxies(spec domain.InstanceSpec, hostPorts []int, sshRemotePo
 	}
 
 	return proxies
+}
+
+// PortSpec describes a single port mapping for proxy building.
+type PortSpec struct {
+	GuestPort  int
+	RemotePort int
+	Proto      string
 }

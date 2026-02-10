@@ -10,8 +10,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/qudata/agent/internal/domain"
 )
 
 // Process manages the FRPC subprocess lifecycle and its configuration.
@@ -37,16 +35,16 @@ func NewProcess(binaryPath, configPath string, logger *slog.Logger) *Process {
 	}
 }
 
-func (p *Process) Start(frp *domain.FRPInfo, agentPort int) error {
+func (p *Process) Start(agentID, secretDomain string, agentPort int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if _, err := os.Stat(p.binaryPath); err != nil {
-		return domain.ErrFRPC{Op: "start", Err: fmt.Errorf("frpc binary not found at %s: %w", p.binaryPath, err)}
+		return fmt.Errorf("frpc binary not found at %s: %w", p.binaryPath, err)
 	}
 
 	p.stopCtx, p.stopCancel = context.WithCancel(context.Background())
-	p.config = NewConfig(frp, agentPort)
+	p.config = NewConfig(agentID, secretDomain, agentPort)
 
 	if err := p.writeConfig(); err != nil {
 		return err
@@ -55,15 +53,17 @@ func (p *Process) Start(frp *domain.FRPInfo, agentPort int) error {
 	return p.startProcess()
 }
 
-func (p *Process) UpdateInstanceProxies(proxies []domain.FRPProxy) error {
+func (p *Process) UpdateInstanceProxies(proxies []Proxy) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.config == nil {
-		return domain.ErrFRPC{Op: "update", Err: fmt.Errorf("frpc not initialized")}
+		return fmt.Errorf("frpc not initialized")
 	}
 
-	p.config.AddInstanceProxies(proxies)
+	for _, proxy := range proxies {
+		p.config.AddInstanceProxy(proxy)
+	}
 
 	if err := p.writeConfig(); err != nil {
 		return err
@@ -77,7 +77,7 @@ func (p *Process) ClearInstanceProxies() error {
 	defer p.mu.Unlock()
 
 	if p.config == nil {
-		return domain.ErrFRPC{Op: "clear", Err: fmt.Errorf("frpc not initialized")}
+		return fmt.Errorf("frpc not initialized")
 	}
 
 	p.config.ClearInstanceProxies()
@@ -108,16 +108,16 @@ func (p *Process) GetConfig() *Config {
 
 func (p *Process) writeConfig() error {
 	if err := os.MkdirAll(filepath.Dir(p.configPath), 0o755); err != nil {
-		return domain.ErrFRPC{Op: "write-config", Err: fmt.Errorf("create config dir: %w", err)}
+		return fmt.Errorf("frpc write-config: create dir: %w", err)
 	}
 
 	data, err := p.config.Render()
 	if err != nil {
-		return domain.ErrFRPC{Op: "write-config", Err: err}
+		return fmt.Errorf("frpc write-config: render: %w", err)
 	}
 
 	if err := os.WriteFile(p.configPath, data, 0o644); err != nil {
-		return domain.ErrFRPC{Op: "write-config", Err: fmt.Errorf("write file: %w", err)}
+		return fmt.Errorf("frpc write-config: write file: %w", err)
 	}
 
 	p.logger.Info("frpc config written", "path", p.configPath)
@@ -130,7 +130,7 @@ func (p *Process) startProcess() error {
 	p.cmd.Stderr = os.Stderr
 
 	if err := p.cmd.Start(); err != nil {
-		return domain.ErrFRPC{Op: "start", Err: fmt.Errorf("start process: %w", err)}
+		return fmt.Errorf("frpc start: %w", err)
 	}
 
 	p.logger.Info("frpc started", "pid", p.cmd.Process.Pid, "config", p.configPath)
@@ -166,7 +166,7 @@ func (p *Process) startProcess() error {
 
 	select {
 	case <-p.done:
-		return domain.ErrFRPC{Op: "start", Err: fmt.Errorf("frpc exited immediately with code %d", p.cmd.ProcessState.ExitCode())}
+		return fmt.Errorf("frpc exited immediately with code %d", p.cmd.ProcessState.ExitCode())
 	case <-time.After(500 * time.Millisecond):
 	}
 

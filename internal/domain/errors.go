@@ -22,19 +22,6 @@ func (e ErrUnknownCommand) Error() string {
 	return fmt.Sprintf("unknown command: %s", e.Command)
 }
 
-type ErrFRPC struct {
-	Op  string
-	Err error
-}
-
-func (e ErrFRPC) Error() string {
-	return fmt.Sprintf("frpc %s: %v", e.Op, e.Err)
-}
-
-func (e ErrFRPC) Unwrap() error {
-	return e.Err
-}
-
 type ErrVFIO struct {
 	Op   string
 	Addr string

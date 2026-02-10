@@ -90,14 +90,17 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	a.meta = meta
 
-	if meta.FRP != nil {
-		if err := a.frpcProc.Start(meta.FRP, meta.Port); err != nil {
-			return fmt.Errorf("start frpc: %w", err)
-		}
-		a.logger.Info("frpc tunnel established", "server", meta.FRP.ServerAddr, "subdomain", meta.FRP.Subdomain)
-	} else {
-		a.logger.Warn("no FRP info, running without tunnel")
+	if meta.SecretDomain == "" {
+		return fmt.Errorf("secret_domain not received from API — cannot start FRPC tunnel")
 	}
+
+	if err := a.frpcProc.Start(meta.ID, meta.SecretDomain, meta.Port); err != nil {
+		return fmt.Errorf("start frpc: %w", err)
+	}
+	a.logger.Info("frpc tunnel established",
+		"subdomain", meta.SecretDomain,
+		"domain", meta.SecretDomain+frpc.DomainSuffix,
+	)
 
 	_ = a.store.ClearInstanceState()
 
@@ -199,7 +202,7 @@ func (a *Agent) bootstrap(ctx context.Context) (*domain.AgentMetadata, error) {
 	a.logger.Info("init response",
 		"host_exists", initResp.HostExists,
 		"has_secret", initResp.SecretKey != "",
-		"has_frp", initResp.FRP != nil,
+		"secret_domain", initResp.SecretDomain,
 	)
 
 	secretKey := initResp.SecretKey
@@ -213,21 +216,22 @@ func (a *Agent) bootstrap(ctx context.Context) (*domain.AgentMetadata, error) {
 		}
 	}
 
-	if initResp.FRP != nil {
-		_ = a.store.SaveFRPInfo(initResp.FRP)
+	secretDomain := initResp.SecretDomain
+	if secretDomain != "" {
+		_ = a.store.SaveSecretDomain(secretDomain)
 	} else {
-		initResp.FRP, _ = a.store.FRPInfo()
+		secretDomain, _ = a.store.SecretDomain()
 	}
 
 	_ = a.store.SaveAPIKey(a.cfg.APIKey)
 
 	return &domain.AgentMetadata{
-		ID:         agentID,
-		Port:       agentPort,
-		Address:    address,
-		SecretKey:  secretKey,
-		FRP:        initResp.FRP,
-		HostExists: initResp.HostExists,
+		ID:           agentID,
+		Port:         agentPort,
+		Address:      address,
+		SecretKey:    secretKey,
+		SecretDomain: secretDomain,
+		HostExists:   initResp.HostExists,
 	}, nil
 }
 
