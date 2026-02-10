@@ -455,6 +455,28 @@ def test_gpu_passthrough(gpu_addr):
 
     ssh_key_path = SSH_DIR / "management_key"
     ssh_port = 2299
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    qemu_log = RUN_DIR / "gpu-test.log"
+
+    # Verify VFIO group device exists
+    iommu_group_link = Path(f"/sys/bus/pci/devices/{gpu_addr}/iommu_group")
+    if iommu_group_link.exists():
+        group_num = os.path.basename(os.readlink(str(iommu_group_link)))
+        vfio_dev = Path(f"/dev/vfio/{group_num}")
+        if not vfio_dev.exists():
+            print(f"  ! /dev/vfio/{group_num} not found — VFIO bind may have failed")
+            print("    Try: modprobe vfio-pci")
+            return False
+        print(f"  + VFIO group /dev/vfio/{group_num} ready")
+
+    # Verify the device is actually bound to vfio-pci
+    driver_link = Path(f"/sys/bus/pci/devices/{gpu_addr}/driver")
+    if driver_link.exists():
+        current_driver = os.path.basename(os.readlink(str(driver_link)))
+        if current_driver != "vfio-pci":
+            print(f"  ! GPU bound to '{current_driver}', not 'vfio-pci'")
+            return False
+        print(f"  + GPU driver: vfio-pci")
 
     overlay = IMAGE_DIR / "gpu-test.qcow2"
     run(
@@ -476,18 +498,40 @@ def test_gpu_passthrough(gpu_addr):
         "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22",
         "-device", "virtio-net-pci,netdev=net0",
         "-nographic",
-        "-bios", "/usr/share/OVMF/OVMF_CODE.fd",
     ]
+
+    # Add OVMF if available (required for GPU passthrough on Q35)
+    ovmf_found = False
+    for ovmf in [
+        "/usr/share/OVMF/OVMF_CODE.fd",
+        "/usr/share/ovmf/OVMF.fd",
+        "/usr/share/edk2/ovmf/OVMF_CODE.fd",
+        "/usr/share/qemu/OVMF.fd",
+    ]:
+        if Path(ovmf).exists():
+            qemu_cmd += ["-bios", ovmf]
+            ovmf_found = True
+            print(f"  + OVMF: {ovmf}")
+            break
+    if not ovmf_found:
+        print("  ! WARNING: OVMF not found — GPU passthrough may not work without UEFI")
+        print("    Install with: apt-get install ovmf")
 
     proc = None
     success = False
+    log_fh = None
 
     try:
         print("  + Starting test VM")
+        print(f"  + QEMU command: {' '.join(qemu_cmd)}")
+        print(f"  + Log: {qemu_log}")
+        log_fh = open(qemu_log, "w")
+        log_fh.write(f"CMD: {' '.join(qemu_cmd)}\n\n")
+        log_fh.flush()
         proc = subprocess.Popen(
             qemu_cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=log_fh,
         )
 
         print("  + Waiting for SSH (up to 120s)")
@@ -496,7 +540,18 @@ def test_gpu_passthrough(gpu_addr):
         while time.time() < deadline:
             time.sleep(3)
             if proc.poll() is not None:
-                print("  ! VM exited unexpectedly")
+                print(f"  ! VM exited with code {proc.returncode}")
+                # Show last lines of QEMU log
+                log_fh.flush()
+                try:
+                    lines = qemu_log.read_text().strip().split("\n")
+                    tail = lines[-20:] if len(lines) > 20 else lines
+                    if tail:
+                        print("  ! QEMU output:")
+                        for line in tail:
+                            print(f"    {line}")
+                except Exception:
+                    pass
                 break
             r = run(
                 [
@@ -542,8 +597,10 @@ def test_gpu_passthrough(gpu_addr):
             success = True
         else:
             print("  ! nvidia-smi failed inside VM")
+            if r.stdout:
+                print(f"    stdout: {r.stdout.strip()[:200]}")
             if r.stderr:
-                print(f"    {r.stderr.strip()[:200]}")
+                print(f"    stderr: {r.stderr.strip()[:200]}")
             success = False
 
     except Exception as e:
@@ -560,6 +617,8 @@ def test_gpu_passthrough(gpu_addr):
                 proc.kill()
                 proc.wait()
 
+        if log_fh:
+            log_fh.close()
         overlay.unlink(missing_ok=True)
 
     return success
