@@ -261,9 +261,19 @@ def create_cloud_init_iso(ssh_pubkey):
 
           - mkdir -p /root/.ssh
           - chmod 700 /root/.ssh
-          - sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
-          - sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+          - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+          - sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
           - systemctl enable ssh
+
+          - |
+            cat > /etc/systemd/network/99-dhcp-all.network << 'NETEOF'
+            [Match]
+            Name=en*
+
+            [Network]
+            DHCP=yes
+            NETEOF
+          - systemctl enable systemd-networkd
 
           - apt-get clean
           - rm -rf /var/lib/apt/lists/*
@@ -450,6 +460,31 @@ def inject_ssh_key():
             ]
         )
 
+    # Wildcard DHCP config — interface name changes with PCI topology
+    net_check = run(
+        ["virt-cat", "-a", str(BASE_IMAGE_PATH),
+         "/etc/systemd/network/99-dhcp-all.network"],
+        check=False,
+    )
+    if net_check.returncode != 0 or "Name=en*" not in net_check.stdout:
+        print("  + Adding wildcard DHCP network config")
+        run([
+            "virt-customize", "-a", str(BASE_IMAGE_PATH),
+            "--write",
+            "/etc/systemd/network/99-dhcp-all.network:"
+            "[Match]\nName=en*\n\n[Network]\nDHCP=yes\n",
+            "--run-command",
+            "systemctl enable systemd-networkd 2>/dev/null; true",
+        ])
+
+    # Ensure PermitRootLogin for key auth
+    run([
+        "virt-customize", "-a", str(BASE_IMAGE_PATH),
+        "--run-command",
+        "sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config; "
+        "systemctl enable ssh 2>/dev/null; systemctl enable sshd 2>/dev/null; true",
+    ], check=False)
+
     # Disable cloud-init to prevent datasource wait on every boot
     ci_check = run(
         ["virt-cat", "-a", str(BASE_IMAGE_PATH), "/etc/cloud/cloud-init.disabled"],
@@ -565,8 +600,7 @@ def test_gpu_passthrough(gpu_addr):
 
     overlay = IMAGE_DIR / "gpu-test.qcow2"
     ovmf_vars = RUN_DIR / "gpu-test-VARS.fd"
-    ci_iso = RUN_DIR / "gpu-test-cidata.iso"
-    cleanup_files = [overlay, ovmf_vars, ci_iso]
+    cleanup_files = [overlay, ovmf_vars]
 
     try:
         # Overlay disk
@@ -577,20 +611,6 @@ def test_gpu_passthrough(gpu_addr):
 
         # OVMF vars copy (UEFI needs writable variable store)
         shutil.copy2(ovmf_vars_tmpl, ovmf_vars)
-
-        # Cloud-init nocloud seed (skip datasource wait)
-        ci_dir = RUN_DIR / "ci-test"
-        ci_dir.mkdir(parents=True, exist_ok=True)
-        (ci_dir / "meta-data").write_text(
-            "instance-id: gpu-test\nlocal-hostname: gpu-test\n"
-        )
-        (ci_dir / "user-data").write_text("#cloud-config\n")
-        run([
-            "genisoimage", "-output", str(ci_iso),
-            "-volid", "cidata", "-joliet", "-rock",
-            str(ci_dir / "user-data"), str(ci_dir / "meta-data"),
-        ])
-        shutil.rmtree(ci_dir, ignore_errors=True)
 
         # ---- QEMU command ----
 
@@ -603,12 +623,10 @@ def test_gpu_passthrough(gpu_addr):
             "-drive", f"if=pflash,format=raw,readonly=on,file={ovmf_code}",
             "-drive", f"if=pflash,format=raw,file={ovmf_vars}",
             "-drive", f"file={overlay},format=qcow2,if=virtio",
-            "-drive", f"file={ci_iso},format=raw,if=virtio,readonly=on",
             "-device", f"vfio-pci,host={gpu_addr}",
             "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22",
             "-device", "virtio-net-pci,netdev=net0",
             "-nographic",
-            "-serial", "mon:stdio",
         ]
 
         # ---- Launch VM ----
