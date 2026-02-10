@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/qudata/agent/internal/domain"
@@ -110,8 +111,8 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 		"ok": true,
 		"data": gin.H{
 			"ports": gin.H{
-				"ssh":    sshRemotePort,
-				"ollama": ollamaRemotePort[0],
+				"22":    strconv.Itoa(sshRemotePort),
+				"11434": strconv.Itoa(ollamaRemotePort[0]),
 			},
 		},
 	})
