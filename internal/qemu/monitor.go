@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -14,9 +15,10 @@ import (
 type QMPClient struct {
 	socketPath string
 
-	mu   sync.Mutex
-	conn net.Conn
-	dec  *json.Decoder
+	mu         sync.Mutex
+	conn       net.Conn
+	dec        *json.Decoder
+	autoReconn bool // Enable automatic reconnection on failure
 }
 
 // qmpMessage is a union type that can represent any QMP response or event.
@@ -46,13 +48,34 @@ type qmpStatusReturn struct {
 
 // NewQMPClient creates a QMP client targeting the given Unix socket path.
 func NewQMPClient(socketPath string) *QMPClient {
-	return &QMPClient{socketPath: socketPath}
+	return &QMPClient{
+		socketPath: socketPath,
+		autoReconn: true,
+	}
+}
+
+// SetAutoReconnect enables or disables automatic reconnection on failure.
+func (c *QMPClient) SetAutoReconnect(enabled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.autoReconn = enabled
 }
 
 // Connect dials the QMP socket and performs the mandatory capabilities handshake.
 func (c *QMPClient) Connect() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.connectLocked()
+}
+
+// connectLocked performs the actual connection. Must be called with c.mu held.
+func (c *QMPClient) connectLocked() error {
+	// Close existing connection if any
+	if c.conn != nil {
+		c.conn.Close()
+		c.conn = nil
+		c.dec = nil
+	}
 
 	conn, err := net.DialTimeout("unix", c.socketPath, 10*time.Second)
 	if err != nil {
@@ -67,6 +90,7 @@ func (c *QMPClient) Connect() error {
 	if err := c.dec.Decode(&greeting); err != nil {
 		conn.Close()
 		c.conn = nil
+		c.dec = nil
 		return fmt.Errorf("read greeting: %w", err)
 	}
 
@@ -74,11 +98,31 @@ func (c *QMPClient) Connect() error {
 	if _, err := c.exec("qmp_capabilities", nil); err != nil {
 		conn.Close()
 		c.conn = nil
+		c.dec = nil
 		return fmt.Errorf("negotiate capabilities: %w", err)
 	}
 
 	_ = conn.SetReadDeadline(time.Time{})
 	return nil
+}
+
+// Reconnect attempts to re-establish the QMP connection.
+func (c *QMPClient) Reconnect() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.connectLocked()
+}
+
+// ensureConnected checks the connection and reconnects if necessary.
+// Must be called with c.mu held.
+func (c *QMPClient) ensureConnected() error {
+	if c.conn != nil {
+		return nil
+	}
+	if !c.autoReconn {
+		return fmt.Errorf("qmp: not connected")
+	}
+	return c.connectLocked()
 }
 
 // Close terminates the QMP connection.
@@ -161,6 +205,26 @@ func (c *QMPClient) QueryStatus() (status string, running bool, err error) {
 // Asynchronous events received between the command and its response are silently skipped.
 // Must be called with c.mu held.
 func (c *QMPClient) exec(command string, args interface{}) (json.RawMessage, error) {
+	// Try to ensure we're connected
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	result, err := c.execOnce(command, args)
+	if err != nil {
+		// If the command failed and auto-reconnect is enabled, try once more
+		if c.autoReconn && (isConnectionError(err) || c.conn == nil) {
+			if reconnErr := c.connectLocked(); reconnErr == nil {
+				return c.execOnce(command, args)
+			}
+		}
+		return nil, err
+	}
+	return result, nil
+}
+
+// execOnce sends a command without retry logic.
+func (c *QMPClient) execOnce(command string, args interface{}) (json.RawMessage, error) {
 	if c.conn == nil {
 		return nil, fmt.Errorf("qmp: not connected")
 	}
@@ -172,15 +236,25 @@ func (c *QMPClient) exec(command string, args interface{}) (json.RawMessage, err
 	}
 
 	if _, err := c.conn.Write(append(data, '\n')); err != nil {
+		c.conn.Close()
+		c.conn = nil
+		c.dec = nil
 		return nil, fmt.Errorf("write %q: %w", command, err)
 	}
 
 	_ = c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }()
+	defer func() {
+		if c.conn != nil {
+			_ = c.conn.SetReadDeadline(time.Time{})
+		}
+	}()
 
 	for {
 		var msg qmpMessage
 		if err := c.dec.Decode(&msg); err != nil {
+			c.conn.Close()
+			c.conn = nil
+			c.dec = nil
 			return nil, fmt.Errorf("read response for %q: %w", command, err)
 		}
 
@@ -195,4 +269,16 @@ func (c *QMPClient) exec(command string, args interface{}) (json.RawMessage, err
 
 		return msg.Return, nil
 	}
+}
+
+// isConnectionError checks if an error indicates a connection problem.
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "not connected")
 }

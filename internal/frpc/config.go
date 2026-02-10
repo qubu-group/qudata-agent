@@ -8,30 +8,23 @@ import (
 	"github.com/qudata/agent/internal/domain"
 )
 
-// Config represents a complete FRPC configuration.
 type Config struct {
-	ServerAddr string
-	ServerPort int
-	AuthToken  string
-
-	// AgentProxy is the proxy for the agent's HTTP API endpoint.
-	AgentProxy *Proxy
-
-	// InstanceProxies are proxies for VM instance ports.
+	ServerAddr      string
+	ServerPort      int
+	AuthToken       string
+	AgentProxy      *Proxy
 	InstanceProxies []Proxy
 }
 
-// Proxy describes a single FRPC proxy entry.
 type Proxy struct {
 	Name         string
-	Type         string // "tcp" or "http"
+	Type         string
 	LocalIP      string
 	LocalPort    int
-	RemotePort   int    // for TCP proxies
-	CustomDomain string // for HTTP proxies
+	RemotePort   int
+	CustomDomain string
 }
 
-// configTemplate is the TOML template for frpc.toml generation.
 var configTemplate = template.Must(template.New("frpc").Parse(`serverAddr = "{{ .ServerAddr }}"
 serverPort = {{ .ServerPort }}
 
@@ -41,7 +34,6 @@ token = "{{ .AuthToken }}"
 
 {{- if .AgentProxy }}
 
-# Agent API endpoint
 [[proxies]]
 name = "{{ .AgentProxy.Name }}"
 type = "{{ .AgentProxy.Type }}"
@@ -57,7 +49,6 @@ remotePort = {{ .AgentProxy.RemotePort }}
 
 {{- range .InstanceProxies }}
 
-# Instance proxy: {{ .Name }}
 [[proxies]]
 name = "{{ .Name }}"
 type = "{{ .Type }}"
@@ -72,8 +63,6 @@ remotePort = {{ .RemotePort }}
 {{- end }}
 `))
 
-// NewConfig creates a base FRPC config from FRP connection info and the agent's
-// local HTTP port. The subdomain is used as the HTTP customDomain for the agent.
 func NewConfig(frp *domain.FRPInfo, agentPort int) *Config {
 	return &Config{
 		ServerAddr: frp.ServerAddr,
@@ -89,7 +78,6 @@ func NewConfig(frp *domain.FRPInfo, agentPort int) *Config {
 	}
 }
 
-// AddInstanceProxies appends FRP proxies for a newly created VM instance.
 func (c *Config) AddInstanceProxies(proxies []domain.FRPProxy) {
 	for _, p := range proxies {
 		c.InstanceProxies = append(c.InstanceProxies, Proxy{
@@ -103,12 +91,10 @@ func (c *Config) AddInstanceProxies(proxies []domain.FRPProxy) {
 	}
 }
 
-// ClearInstanceProxies removes all instance proxies (used on instance deletion).
 func (c *Config) ClearInstanceProxies() {
 	c.InstanceProxies = nil
 }
 
-// Render generates the TOML config file content.
 func (c *Config) Render() ([]byte, error) {
 	var buf bytes.Buffer
 	if err := configTemplate.Execute(&buf, c); err != nil {
@@ -117,8 +103,6 @@ func (c *Config) Render() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// BuildInstanceProxies creates FRP proxy definitions from the instance spec
-// and the allocated host ports. The subdomain is used for HTTP proxy customDomains.
 func BuildInstanceProxies(spec domain.InstanceSpec, hostPorts []int, subdomain string) []domain.FRPProxy {
 	proxies := make([]domain.FRPProxy, 0, len(spec.Ports))
 	for i, pm := range spec.Ports {

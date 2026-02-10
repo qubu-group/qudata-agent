@@ -23,7 +23,9 @@ const (
 
 // PortMapping describes how a container port is exposed via FRP.
 type PortMapping struct {
+	Name          string `json:"name,omitempty"`
 	ContainerPort int    `json:"container_port"`
+	HostPort      int    `json:"host_port,omitempty"`
 	RemotePort    int    `json:"remote_port"`
 	Proto         string `json:"proto"` // "tcp" or "http"
 }

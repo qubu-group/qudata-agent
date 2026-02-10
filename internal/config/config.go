@@ -7,61 +7,30 @@ import (
 	"strings"
 )
 
-// Build-time variables injected via -ldflags.
 var (
 	Version   = "dev"
 	BuildTime = "unknown"
 )
 
-// Config holds all agent configuration loaded from environment variables.
 type Config struct {
-	// APIKey is the Qudata API key (must start with "ak-").
-	APIKey string
-
-	// ServiceURL is the base URL of the Qudata API.
+	APIKey     string
 	ServiceURL string
+	Debug      bool
+	DataDir    string
+	LogDir     string
 
-	// Debug enables mock GPU data and verbose logging.
-	Debug bool
-
-	// DataDir is the root directory for persistent agent data.
-	DataDir string
-
-	// LogDir is the directory for log files.
-	LogDir string
-
-	// FRPCBinary is the path to the frpc executable.
-	FRPCBinary string
-
-	// FRPCConfigPath is the path where the generated frpc.toml is written.
+	FRPCBinary     string
 	FRPCConfigPath string
 
-	// Backend selects the virtualization backend: "docker" or "qemu".
-	Backend string
-
-	// QEMUBinary is the path to the qemu-system-x86_64 binary.
-	QEMUBinary string
-
-	// OVMFPath is the path to the OVMF UEFI firmware image.
-	OVMFPath string
-
-	// BaseImagePath is the path to the pre-built base qcow2 image for QEMU instances.
-	BaseImagePath string
-
-	// ImageDir is the directory for storing qcow2 disk images.
-	ImageDir string
-
-	// VMRunDir is the directory for QMP sockets and VM runtime files.
-	VMRunDir string
-
-	// GPUPCIAddr is the default PCI address of the GPU for VFIO passthrough.
-	GPUPCIAddr string
-
-	// ManagementKeyPath is the SSH private key used to manage QEMU guest instances.
+	QEMUBinary        string
+	OVMFPath          string
+	BaseImagePath     string
+	ImageDir          string
+	VMRunDir          string
+	GPUPCIAddr        string
 	ManagementKeyPath string
 }
 
-// DefaultConfig returns a Config populated with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
 		ServiceURL:     "https://internal.qudata.ai/v0",
@@ -69,7 +38,6 @@ func DefaultConfig() *Config {
 		LogDir:         "/var/log/qudata",
 		FRPCBinary:     "/usr/local/bin/frpc",
 		FRPCConfigPath: "/etc/qudata/frpc.toml",
-		Backend:        "docker",
 		QEMUBinary:     "/usr/bin/qemu-system-x86_64",
 		OVMFPath:       "/usr/share/OVMF/OVMF_CODE.fd",
 		ImageDir:       "/var/lib/qudata/images",
@@ -77,9 +45,6 @@ func DefaultConfig() *Config {
 	}
 }
 
-// Load reads configuration from environment variables, applying defaults
-// for anything not explicitly set. Returns an error if required values
-// are missing or malformed.
 func Load() (*Config, error) {
 	cfg := DefaultConfig()
 
@@ -94,61 +59,45 @@ func Load() (*Config, error) {
 	if v := os.Getenv("QUDATA_SERVICE_URL"); v != "" {
 		cfg.ServiceURL = v
 	}
-
-	cfg.Debug = os.Getenv("QUDATA_AGENT_DEBUG") == "true"
-
 	if v := os.Getenv("QUDATA_DATA_DIR"); v != "" {
 		cfg.DataDir = v
 	}
-
 	if v := os.Getenv("QUDATA_LOG_DIR"); v != "" {
 		cfg.LogDir = v
 	}
-
 	if v := os.Getenv("QUDATA_FRPC_BINARY"); v != "" {
 		cfg.FRPCBinary = v
 	}
-
 	if v := os.Getenv("QUDATA_FRPC_CONFIG"); v != "" {
 		cfg.FRPCConfigPath = v
 	}
-
-	if v := os.Getenv("QUDATA_BACKEND"); v != "" {
-		cfg.Backend = v
-	}
-
 	if v := os.Getenv("QUDATA_QEMU_BINARY"); v != "" {
 		cfg.QEMUBinary = v
 	}
-
 	if v := os.Getenv("QUDATA_OVMF_PATH"); v != "" {
 		cfg.OVMFPath = v
 	}
-
 	if v := os.Getenv("QUDATA_BASE_IMAGE"); v != "" {
 		cfg.BaseImagePath = v
 	}
-
 	if v := os.Getenv("QUDATA_IMAGE_DIR"); v != "" {
 		cfg.ImageDir = v
 	}
-
 	if v := os.Getenv("QUDATA_VM_RUN_DIR"); v != "" {
 		cfg.VMRunDir = v
 	}
-
 	if v := os.Getenv("QUDATA_GPU_PCI_ADDR"); v != "" {
 		cfg.GPUPCIAddr = v
 	}
-
 	if v := os.Getenv("QUDATA_MANAGEMENT_KEY"); v != "" {
 		cfg.ManagementKeyPath = v
 	}
 
+	cfg.Debug = os.Getenv("QUDATA_DEBUG") == "true"
+
 	return cfg, nil
 }
 
-// NewLogger creates a structured logger that writes to both stdout and a log file.
 func NewLogger(cfg *Config, name string) (*slog.Logger, error) {
 	if err := os.MkdirAll(cfg.LogDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create log dir: %w", err)
@@ -166,7 +115,5 @@ func NewLogger(cfg *Config, name string) (*slog.Logger, error) {
 	}
 
 	handler := slog.NewJSONHandler(file, &slog.HandlerOptions{Level: level})
-	logger := slog.New(handler)
-
-	return logger, nil
+	return slog.New(handler), nil
 }

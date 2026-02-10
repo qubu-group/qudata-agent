@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/qudata/agent/internal/config"
-	"github.com/qudata/agent/internal/docker"
 	"github.com/qudata/agent/internal/domain"
 	"github.com/qudata/agent/internal/frpc"
 	"github.com/qudata/agent/internal/gpu"
@@ -16,11 +15,11 @@ import (
 	"github.com/qudata/agent/internal/qemu"
 	"github.com/qudata/agent/internal/qudata"
 	"github.com/qudata/agent/internal/server"
+	"github.com/qudata/agent/internal/ssh"
 	"github.com/qudata/agent/internal/storage"
 	"github.com/qudata/agent/internal/system"
 )
 
-// Agent is the top-level application that orchestrates all subsystems.
 type Agent struct {
 	cfg    *config.Config
 	logger *slog.Logger
@@ -35,12 +34,9 @@ type Agent struct {
 	gpuMetrics *gpu.Metrics
 
 	httpServer *server.Server
-
-	meta *domain.AgentMetadata
+	meta       *domain.AgentMetadata
 }
 
-// New creates and wires all agent subsystems.
-// The VM backend (Docker or QEMU) is selected based on cfg.Backend.
 func New(cfg *config.Config, logger *slog.Logger) (*Agent, error) {
 	store, err := storage.NewStore(cfg.DataDir)
 	if err != nil {
@@ -54,8 +50,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Agent, error) {
 	frpcProc := frpc.NewProcess(cfg.FRPCBinary, cfg.FRPCConfigPath, logger)
 	portAlloc := network.NewPortAllocator()
 
-	// Select the VM backend.
-	vm, err := newVMManager(cfg, logger)
+	vm, err := newVMManager(cfg, logger, statsCollector)
 	if err != nil {
 		return nil, fmt.Errorf("init vm backend: %w", err)
 	}
@@ -74,28 +69,31 @@ func New(cfg *config.Config, logger *slog.Logger) (*Agent, error) {
 	}, nil
 }
 
-// newVMManager constructs the appropriate VMManager based on the configured backend.
-func newVMManager(cfg *config.Config, logger *slog.Logger) (domain.VMManager, error) {
-	switch cfg.Backend {
-	case "qemu":
-		return qemu.NewManager(qemu.Config{
-			QEMUBinary:     cfg.QEMUBinary,
-			OVMFPath:       cfg.OVMFPath,
-			BaseImagePath:  cfg.BaseImagePath,
-			ImageDir:       cfg.ImageDir,
-			RunDir:         cfg.VMRunDir,
-			DefaultGPUAddr: cfg.GPUPCIAddr,
-			SSHKeyPath:     cfg.ManagementKeyPath,
-		}, logger), nil
-	case "docker", "":
-		return docker.NewManager(logger), nil
-	default:
-		return nil, fmt.Errorf("unknown backend %q (expected \"docker\" or \"qemu\")", cfg.Backend)
+func newVMManager(cfg *config.Config, logger *slog.Logger, stats *system.StatsCollector) (domain.VMManager, error) {
+	sshKeyPath := cfg.ManagementKeyPath
+	if sshKeyPath == "" {
+		keyPair, err := ssh.EnsureManagementKey(cfg.DataDir + "/.ssh")
+		if err != nil {
+			return nil, fmt.Errorf("ensure management key: %w", err)
+		}
+		sshKeyPath = keyPair.PrivateKeyPath
+		logger.Info("using management key", "path", sshKeyPath)
 	}
+
+	mgr := qemu.NewManager(qemu.Config{
+		QEMUBinary:     cfg.QEMUBinary,
+		OVMFPath:       cfg.OVMFPath,
+		BaseImagePath:  cfg.BaseImagePath,
+		ImageDir:       cfg.ImageDir,
+		RunDir:         cfg.VMRunDir,
+		DefaultGPUAddr: cfg.GPUPCIAddr,
+		SSHKeyPath:     sshKeyPath,
+	}, logger)
+
+	stats.SetVMMetricsProvider(mgr)
+	return mgr, nil
 }
 
-// Run executes the agent lifecycle: bootstrap, FRPC, HTTP server, stats loop.
-// It blocks until the context is cancelled.
 func (a *Agent) Run(ctx context.Context) error {
 	meta, err := a.bootstrap(ctx)
 	if err != nil {
@@ -103,28 +101,21 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	a.meta = meta
 
-	// Start FRPC tunnel.
 	if meta.FRP != nil {
 		if err := a.frpcProc.Start(meta.FRP, meta.Port); err != nil {
 			return fmt.Errorf("start frpc: %w", err)
 		}
-		a.logger.Info("FRPC tunnel established",
-			"server", meta.FRP.ServerAddr,
-			"subdomain", meta.FRP.Subdomain,
-		)
+		a.logger.Info("FRPC tunnel established", "server", meta.FRP.ServerAddr, "subdomain", meta.FRP.Subdomain)
 	} else {
 		a.logger.Warn("no FRP info received from API, running without tunnel")
 	}
 
-	// Restore a previously running instance if any.
 	if err := a.restoreState(ctx); err != nil {
 		a.logger.Warn("failed to restore instance state", "err", err)
 	}
 
-	// Start stats publisher.
 	go a.publishStats(ctx)
 
-	// Start HTTP server.
 	a.httpServer = server.New(
 		meta.Port,
 		meta.SecretKey,
@@ -138,7 +129,6 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	a.logger.Info("agent ready",
 		"version", config.Version,
-		"backend", a.cfg.Backend,
 		"agent_id", meta.ID,
 		"port", meta.Port,
 		"address", meta.Address,
@@ -186,10 +176,7 @@ func (a *Agent) bootstrap(ctx context.Context) (*domain.AgentMetadata, error) {
 		Version:     config.Version,
 	}
 
-	a.logger.Info("initializing agent with API",
-		"agent_id", agentID,
-		"port", agentPort,
-	)
+	a.logger.Info("initializing agent with API", "agent_id", agentID, "port", agentPort)
 
 	initResp, err := a.api.InitAgent(ctx, initReq)
 	if err != nil {
@@ -219,11 +206,7 @@ func (a *Agent) bootstrap(ctx context.Context) (*domain.AgentMetadata, error) {
 
 	if !initResp.HostExists {
 		hostReq := a.probe.HostRegistration()
-		a.logger.Info("registering host",
-			"gpu", hostReq.GPUName,
-			"gpu_count", hostReq.GPUAmount,
-			"vram", hostReq.VRAM,
-		)
+		a.logger.Info("registering host", "gpu", hostReq.GPUName, "gpu_count", hostReq.GPUAmount, "vram", hostReq.VRAM)
 		if err := a.api.RegisterHost(ctx, hostReq); err != nil {
 			return nil, fmt.Errorf("register host: %w", err)
 		}
@@ -252,10 +235,7 @@ func (a *Agent) restoreState(ctx context.Context) error {
 		return nil
 	}
 
-	a.logger.Info("restoring instance state",
-		"vm_id", state.ContainerID,
-		"ports", state.Ports,
-	)
+	a.logger.Info("restoring instance state", "vm_id", state.ContainerID, "ports", state.Ports)
 
 	a.vm.RestoreState(state)
 

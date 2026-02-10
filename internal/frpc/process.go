@@ -15,7 +15,6 @@ import (
 )
 
 // Process manages the FRPC subprocess lifecycle and its configuration.
-// It automatically restarts the FRPC process if it exits unexpectedly.
 type Process struct {
 	logger     *slog.Logger
 	binaryPath string
@@ -24,14 +23,12 @@ type Process struct {
 	mu     sync.Mutex
 	cmd    *exec.Cmd
 	config *Config
-	done   chan struct{} // closed when the process exits
+	done   chan struct{}
 
-	// Auto-restart
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 }
 
-// NewProcess creates a new FRPC process manager.
 func NewProcess(binaryPath, configPath string, logger *slog.Logger) *Process {
 	return &Process{
 		logger:     logger,
@@ -40,21 +37,17 @@ func NewProcess(binaryPath, configPath string, logger *slog.Logger) *Process {
 	}
 }
 
-// Start initializes the FRPC config and starts the process with auto-restart.
 func (p *Process) Start(frp *domain.FRPInfo, agentPort int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Validate frpc binary exists
 	if _, err := os.Stat(p.binaryPath); err != nil {
 		return domain.ErrFRPC{Op: "start", Err: fmt.Errorf("frpc binary not found at %s: %w", p.binaryPath, err)}
 	}
 
-	// Create auto-restart context
 	p.stopCtx, p.stopCancel = context.WithCancel(context.Background())
-
-	// Create config
 	p.config = NewConfig(frp, agentPort)
+
 	if err := p.writeConfig(); err != nil {
 		return err
 	}
@@ -62,7 +55,6 @@ func (p *Process) Start(frp *domain.FRPInfo, agentPort int) error {
 	return p.startProcess()
 }
 
-// UpdateInstanceProxies adds instance proxies, rewrites config, and restarts FRPC.
 func (p *Process) UpdateInstanceProxies(proxies []domain.FRPProxy) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -80,7 +72,6 @@ func (p *Process) UpdateInstanceProxies(proxies []domain.FRPProxy) error {
 	return p.restart()
 }
 
-// ClearInstanceProxies removes all instance proxies, rewrites config, and restarts FRPC.
 func (p *Process) ClearInstanceProxies() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -98,12 +89,10 @@ func (p *Process) ClearInstanceProxies() error {
 	return p.restart()
 }
 
-// Stop gracefully stops the FRPC process and disables auto-restart.
 func (p *Process) Stop() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Signal that we're stopping intentionally — disable auto-restart
 	if p.stopCancel != nil {
 		p.stopCancel()
 	}
@@ -111,14 +100,11 @@ func (p *Process) Stop() error {
 	return p.stopProcess()
 }
 
-// GetConfig returns the current config (for state persistence).
 func (p *Process) GetConfig() *Config {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.config
 }
-
-// --- internal ---
 
 func (p *Process) writeConfig() error {
 	if err := os.MkdirAll(filepath.Dir(p.configPath), 0o755); err != nil {
@@ -147,23 +133,16 @@ func (p *Process) startProcess() error {
 		return domain.ErrFRPC{Op: "start", Err: fmt.Errorf("start process: %w", err)}
 	}
 
-	p.logger.Info("frpc started",
-		"pid", p.cmd.Process.Pid,
-		"config", p.configPath,
-	)
+	p.logger.Info("frpc started", "pid", p.cmd.Process.Pid, "config", p.configPath)
 
-	// Monitor process in background; signal via done channel
 	p.done = make(chan struct{})
 	go func() {
 		err := p.cmd.Wait()
 		close(p.done)
 
-		// Auto-restart if the process exited unexpectedly
-		// (not during a controlled stop/restart)
 		if p.stopCtx != nil {
 			select {
 			case <-p.stopCtx.Done():
-				// Agent is shutting down — do not restart
 				p.logger.Info("frpc process exited during shutdown")
 				return
 			default:
@@ -185,12 +164,10 @@ func (p *Process) startProcess() error {
 		}
 	}()
 
-	// Brief delay to verify the process started successfully
 	select {
 	case <-p.done:
 		return domain.ErrFRPC{Op: "start", Err: fmt.Errorf("frpc exited immediately with code %d", p.cmd.ProcessState.ExitCode())}
 	case <-time.After(500 * time.Millisecond):
-		// Process is still running — good
 	}
 
 	return nil
@@ -203,7 +180,6 @@ func (p *Process) stopProcess() error {
 
 	p.logger.Info("stopping frpc", "pid", p.cmd.Process.Pid)
 
-	// Check if the process already exited
 	if p.done != nil {
 		select {
 		case <-p.done:
@@ -214,13 +190,11 @@ func (p *Process) stopProcess() error {
 		}
 	}
 
-	// Send SIGTERM first for graceful shutdown
 	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		p.logger.Warn("sigterm failed, killing", "err", err)
 		_ = p.cmd.Process.Kill()
 	}
 
-	// Wait for the monitor goroutine to confirm exit
 	if p.done != nil {
 		select {
 		case <-p.done:

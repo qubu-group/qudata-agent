@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,14 +12,12 @@ import (
 )
 
 func main() {
-	// Load configuration from environment variables
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "configuration error: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Initialize logger
 	logger, err := config.NewLogger(cfg, "agent")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "logger error: %v\n", err)
@@ -33,13 +30,9 @@ func main() {
 		"debug", cfg.Debug,
 	)
 
-	// Create context with signal handling for graceful shutdown
-	ctx, cancel := signal.NotifyContext(context.Background(),
-		syscall.SIGINT, syscall.SIGTERM,
-	)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Create and run agent
 	a, err := agent.New(cfg, logger)
 	if err != nil {
 		logger.Error("failed to create agent", "err", err)
@@ -51,7 +44,5 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Also log to stderr for systemd journal visibility
-	slog.SetDefault(logger)
 	logger.Info("agent stopped cleanly")
 }

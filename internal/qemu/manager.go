@@ -16,7 +16,6 @@ import (
 	"github.com/qudata/agent/internal/domain"
 )
 
-// Config holds the configuration required by the QEMU VM manager.
 type Config struct {
 	QEMUBinary     string
 	OVMFPath       string
@@ -27,9 +26,6 @@ type Config struct {
 	SSHKeyPath     string
 }
 
-// Manager implements domain.VMManager for QEMU virtual machines with VFIO
-// GPU passthrough. It manages the full VM lifecycle: VFIO binding, disk
-// provisioning, QEMU process control via QMP, and SSH-based guest management.
 type Manager struct {
 	logger     *slog.Logger
 	qemuBin    string
@@ -47,15 +43,18 @@ type Manager struct {
 	logFile    *os.File
 	vfio       *VFIO
 	qmp        *QMPClient
+	sshClient  *SSHClient
 	ports      domain.InstancePorts
 	diskPath   string
 	qmpSocket  string
 	gpuAddr    string
 	sshEnabled bool
-	done       chan struct{} // closed when the QEMU process exits
+	done       chan struct{}
+
+	containerID string
+	spec        *domain.InstanceSpec
 }
 
-// NewManager creates a QEMU VM manager from the given configuration.
 func NewManager(cfg Config, logger *slog.Logger) *Manager {
 	return &Manager{
 		logger:     logger,
@@ -69,9 +68,6 @@ func NewManager(cfg Config, logger *slog.Logger) *Manager {
 	}
 }
 
-// Create provisions a QEMU VM with VFIO GPU passthrough and starts it.
-//
-// Steps: bind GPU → create disk overlay → build QEMU args → start process → connect QMP.
 func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPorts []int) (domain.InstancePorts, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -82,7 +78,6 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 	m.creating = true
 	defer func() { m.creating = false }()
 
-	// Resolve GPU PCI address.
 	gpuAddr := spec.GPUAddr
 	if gpuAddr == "" {
 		gpuAddr = m.defaultGPU
@@ -91,23 +86,19 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 		return nil, domain.ErrQEMU{Op: "create", Err: fmt.Errorf("no GPU PCI address configured")}
 	}
 
-	// Bind GPU to VFIO.
 	vfio := NewVFIO(gpuAddr)
 	if err := vfio.Bind(); err != nil {
 		return nil, domain.ErrVFIO{Op: "bind", Addr: gpuAddr, Err: err}
 	}
 
-	// Generate a unique VM identifier.
 	vmID := "vm-" + uuid.New().String()[:8]
 
-	// Prepare disk image.
 	diskPath, err := m.prepareDisk(vmID, spec.DiskSizeGB)
 	if err != nil {
 		_ = vfio.Unbind()
 		return nil, domain.ErrQEMU{Op: "disk", Err: err}
 	}
 
-	// Build host↔guest port mappings.
 	portMap := make(domain.InstancePorts)
 	netCfg := NewNetworkConfig("net0")
 	for i, pm := range spec.Ports {
@@ -117,26 +108,18 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 		}
 	}
 
-	// Build QEMU command line.
 	qmpSocket := filepath.Join(m.runDir, vmID+".qmp")
 	args := m.buildArgs(spec, diskPath, gpuAddr, qmpSocket, netCfg)
 
-	// Ensure runtime directory exists.
 	if err := os.MkdirAll(m.runDir, 0o755); err != nil {
 		_ = m.images.RemoveDisk(diskPath)
 		_ = vfio.Unbind()
 		return nil, domain.ErrQEMU{Op: "rundir", Err: err}
 	}
 
-	// Open log file for QEMU stdout/stderr.
 	logFile, _ := os.Create(filepath.Join(m.runDir, vmID+".log"))
 
-	// Start the QEMU process.
-	m.logger.Info("starting QEMU VM",
-		"vm_id", vmID,
-		"gpu", gpuAddr,
-		"disk", diskPath,
-	)
+	m.logger.Info("starting QEMU VM", "vm_id", vmID, "gpu", gpuAddr, "disk", diskPath)
 
 	cmd := exec.Command(m.qemuBin, args...)
 	if logFile != nil {
@@ -153,7 +136,6 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 		return nil, domain.ErrQEMU{Op: "start", Err: err}
 	}
 
-	// Populate manager state.
 	m.vmID = vmID
 	m.cmd = cmd
 	m.logFile = logFile
@@ -163,8 +145,8 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 	m.qmpSocket = qmpSocket
 	m.gpuAddr = gpuAddr
 	m.sshEnabled = spec.SSHEnabled
+	m.spec = &spec
 
-	// Monitor the process in the background.
 	m.done = make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
@@ -174,7 +156,6 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 		close(m.done)
 	}()
 
-	// Wait for the QMP socket to appear and establish a control connection.
 	qmpClient := NewQMPClient(qmpSocket)
 	if err := m.waitForQMP(qmpClient, 30*time.Second); err != nil {
 		m.logger.Warn("QMP connect failed; VM may still be booting", "err", err)
@@ -182,16 +163,82 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 		m.qmp = qmpClient
 	}
 
-	m.logger.Info("QEMU VM started",
-		"vm_id", vmID,
-		"pid", cmd.Process.Pid,
-		"ports", portMap,
-	)
+	m.logger.Info("QEMU VM started", "vm_id", vmID, "pid", cmd.Process.Pid, "ports", portMap)
+
+	go m.setupDockerInVM(context.Background(), spec)
 
 	return portMap, nil
 }
 
-// Manage executes a lifecycle command on the running VM.
+func (m *Manager) setupDockerInVM(ctx context.Context, spec domain.InstanceSpec) {
+	sshPort := m.sshPort()
+	if sshPort == 0 {
+		m.logger.Warn("no SSH port configured, skipping Docker setup")
+		return
+	}
+
+	sshClient := NewSSHClient("127.0.0.1", sshPort, m.sshKeyPath)
+
+	m.logger.Info("waiting for VM SSH", "port", sshPort)
+	if err := sshClient.WaitForBoot(ctx, 180*time.Second); err != nil {
+		m.logger.Error("VM SSH timeout", "err", err)
+		return
+	}
+
+	m.mu.Lock()
+	m.sshClient = sshClient
+	m.mu.Unlock()
+
+	m.logger.Info("VM SSH ready")
+
+	image := spec.Image
+	if spec.Registry != "" {
+		image = spec.Registry + "/" + image
+	}
+
+	if spec.Registry != "" && spec.Login != "" && spec.Password != "" {
+		if err := sshClient.DockerLogin(ctx, spec.Registry, spec.Login, spec.Password); err != nil {
+			m.logger.Warn("docker login failed", "err", err)
+		}
+	}
+
+	m.logger.Info("pulling image", "image", image, "tag", spec.ImageTag)
+	if err := sshClient.DockerPull(ctx, image, spec.ImageTag); err != nil {
+		m.logger.Error("docker pull failed", "err", err)
+		return
+	}
+
+	ports := make(map[string]string)
+	for _, pm := range spec.Ports {
+		p := strconv.Itoa(pm.ContainerPort)
+		ports[p] = p
+	}
+
+	opts := DockerRunOptions{
+		Image:      image,
+		Tag:        spec.ImageTag,
+		Command:    spec.Command,
+		EnvVars:    spec.EnvVars,
+		Ports:      ports,
+		CPUs:       spec.CPUs,
+		Memory:     spec.Memory,
+		GPUEnabled: true,
+		DataVolume: "/var/lib/qudata/data",
+	}
+
+	containerID, err := sshClient.DockerRun(ctx, opts)
+	if err != nil {
+		m.logger.Error("docker run failed", "err", err)
+		return
+	}
+
+	m.mu.Lock()
+	m.containerID = containerID
+	m.mu.Unlock()
+
+	m.logger.Info("container started in VM", "container_id", containerID)
+}
+
 func (m *Manager) Manage(ctx context.Context, cmd domain.InstanceCommand) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -216,8 +263,6 @@ func (m *Manager) Manage(ctx context.Context, cmd domain.InstanceCommand) error 
 	}
 }
 
-// Stop gracefully shuts down the VM via ACPI, waits for the process to exit,
-// then releases the GPU and removes the disk.
 func (m *Manager) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -226,14 +271,16 @@ func (m *Manager) Stop(ctx context.Context) error {
 		return nil
 	}
 
-	// Request ACPI shutdown.
+	if m.containerID != "" && m.sshClient != nil {
+		_ = m.sshClient.DockerStop(ctx, m.containerID)
+	}
+
 	if m.qmp != nil && m.qmp.Connected() {
 		if err := m.qmp.Shutdown(); err != nil {
 			m.logger.Warn("QMP shutdown failed, will force-kill", "err", err)
 		}
 	}
 
-	// Wait for the process to exit with a timeout.
 	if m.done != nil {
 		select {
 		case <-m.done:
@@ -248,7 +295,6 @@ func (m *Manager) Stop(ctx context.Context) error {
 	return nil
 }
 
-// Status returns the current VM lifecycle state by querying QMP.
 func (m *Manager) Status(ctx context.Context) domain.InstanceStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -260,7 +306,6 @@ func (m *Manager) Status(ctx context.Context) domain.InstanceStatus {
 		return domain.StatusDestroyed
 	}
 
-	// Check if the process has exited.
 	if m.done != nil {
 		select {
 		case <-m.done:
@@ -269,7 +314,6 @@ func (m *Manager) Status(ctx context.Context) domain.InstanceStatus {
 		}
 	}
 
-	// Query QMP if connected.
 	if m.qmp != nil && m.qmp.Connected() {
 		status, _, err := m.qmp.QueryStatus()
 		if err == nil {
@@ -280,29 +324,24 @@ func (m *Manager) Status(ctx context.Context) domain.InstanceStatus {
 	return domain.StatusRunning
 }
 
-// IsRunning reports whether a VM is currently active.
 func (m *Manager) IsRunning() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.vmID != ""
 }
 
-// VMID returns the identifier of the running VM.
 func (m *Manager) VMID() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.vmID
 }
 
-// Ports returns the current guest-to-host port mappings.
 func (m *Manager) Ports() domain.InstancePorts {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.ports
 }
 
-// RestoreState reconstructs the manager from a previously persisted InstanceState.
-// It attempts to reconnect to a running QEMU process via the QMP socket.
 func (m *Manager) RestoreState(state *domain.InstanceState) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -317,17 +356,14 @@ func (m *Manager) RestoreState(state *domain.InstanceState) {
 	m.sshEnabled = state.SSHEnabled
 	m.gpuAddr = state.GPUAddr
 
-	// Derive runtime paths from VM ID.
 	m.qmpSocket = filepath.Join(m.runDir, m.vmID+".qmp")
 	m.diskPath = m.images.DiskPath(m.vmID)
 
-	// Restore VFIO state.
 	if m.gpuAddr != "" {
 		m.vfio = NewVFIO(m.gpuAddr)
 		m.vfio.RestoreBinding()
 	}
 
-	// Attempt to reconnect QMP.
 	qmp := NewQMPClient(m.qmpSocket)
 	if err := qmp.Connect(); err != nil {
 		m.logger.Warn("QMP reconnect failed during restore", "err", err)
@@ -335,9 +371,16 @@ func (m *Manager) RestoreState(state *domain.InstanceState) {
 		m.qmp = qmp
 		m.logger.Info("QMP reconnected after restore", "vm_id", m.vmID)
 	}
+
+	sshPort := 0
+	if p, ok := m.ports["22"]; ok {
+		sshPort, _ = strconv.Atoi(p)
+	}
+	if sshPort > 0 {
+		m.sshClient = NewSSHClient("127.0.0.1", sshPort, m.sshKeyPath)
+	}
 }
 
-// AddSSHKey installs an SSH public key inside the running VM via SSH.
 func (m *Manager) AddSSHKey(ctx context.Context, pubkey string) error {
 	pubkey = strings.TrimSpace(pubkey)
 	if pubkey == "" {
@@ -354,7 +397,6 @@ func (m *Manager) AddSSHKey(ctx context.Context, pubkey string) error {
 	return nil
 }
 
-// RemoveSSHKey removes an SSH public key from the running VM via SSH.
 func (m *Manager) RemoveSSHKey(ctx context.Context, pubkey string) error {
 	pubkey = strings.TrimSpace(pubkey)
 	if pubkey == "" {
@@ -369,9 +411,34 @@ func (m *Manager) RemoveSSHKey(ctx context.Context, pubkey string) error {
 	return nil
 }
 
-// --- internal helpers ---
+func (m *Manager) GetGPUMetrics(ctx context.Context) (*domain.VMGPUMetrics, error) {
+	m.mu.Lock()
+	sshClient := m.sshClient
+	m.mu.Unlock()
 
-// prepareDisk creates the VM disk, preferring a CoW overlay on the base image.
+	if sshClient == nil {
+		return nil, fmt.Errorf("SSH not ready")
+	}
+
+	metrics, err := sshClient.GetGPUMetrics(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return &domain.VMGPUMetrics{
+		Utilization: metrics.Utilization,
+		Temperature: metrics.Temperature,
+		MemoryUsed:  metrics.MemoryUsed,
+		MemoryTotal: metrics.MemoryTotal,
+	}, nil
+}
+
+func (m *Manager) SSHReady() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sshClient != nil
+}
+
 func (m *Manager) prepareDisk(vmID string, sizeGB int) (string, error) {
 	if m.baseImage != "" {
 		return m.images.CreateOverlay(vmID, m.baseImage)
@@ -382,12 +449,7 @@ func (m *Manager) prepareDisk(vmID string, sizeGB int) (string, error) {
 	return m.images.CreateDisk(vmID, sizeGB)
 }
 
-// buildArgs constructs the full qemu-system-x86_64 command line.
-func (m *Manager) buildArgs(
-	spec domain.InstanceSpec,
-	diskPath, gpuAddr, qmpSocket string,
-	net *NetworkConfig,
-) []string {
+func (m *Manager) buildArgs(spec domain.InstanceSpec, diskPath, gpuAddr, qmpSocket string, net *NetworkConfig) []string {
 	cpus := parseSMP(spec.CPUs, "4")
 	mem := parseMemory(spec.Memory, "8G")
 
@@ -410,11 +472,9 @@ func (m *Manager) buildArgs(
 	return args
 }
 
-// waitForQMP polls for the QMP Unix socket to appear, then connects.
 func (m *Manager) waitForQMP(qmp *QMPClient, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		// Check if QEMU already exited.
 		select {
 		case <-m.done:
 			return fmt.Errorf("QEMU process exited before QMP was ready")
@@ -431,11 +491,10 @@ func (m *Manager) waitForQMP(qmp *QMPClient, timeout time.Duration) error {
 	return fmt.Errorf("timeout waiting for QMP socket %s", m.qmpSocket)
 }
 
-// sshExec runs a command inside the VM over SSH through the forwarded port.
 func (m *Manager) sshExec(ctx context.Context, command string) ([]byte, error) {
 	port := m.sshPort()
 	if port == 0 {
-		return nil, fmt.Errorf("no SSH port forwarding configured (guest port 22 not mapped)")
+		return nil, fmt.Errorf("no SSH port forwarding configured")
 	}
 
 	args := []string{
@@ -453,7 +512,6 @@ func (m *Manager) sshExec(ctx context.Context, command string) ([]byte, error) {
 	return exec.CommandContext(ctx, "ssh", args...).CombinedOutput()
 }
 
-// sshPort returns the host port forwarded to guest port 22, or 0 if absent.
 func (m *Manager) sshPort() int {
 	portStr, ok := m.ports["22"]
 	if !ok {
@@ -463,7 +521,6 @@ func (m *Manager) sshPort() int {
 	return p
 }
 
-// forceKill sends SIGKILL to the QEMU process.
 func (m *Manager) forceKill() {
 	if m.cmd != nil && m.cmd.Process != nil {
 		_ = m.cmd.Process.Kill()
@@ -473,15 +530,12 @@ func (m *Manager) forceKill() {
 	}
 }
 
-// cleanup releases all resources held by a stopped VM.
 func (m *Manager) cleanup() {
-	// Close QMP connection.
 	if m.qmp != nil {
 		_ = m.qmp.Close()
 		m.qmp = nil
 	}
 
-	// Unbind GPU from VFIO.
 	if m.vfio != nil {
 		if err := m.vfio.Unbind(); err != nil {
 			m.logger.Warn("VFIO unbind error during cleanup", "err", err)
@@ -489,12 +543,10 @@ func (m *Manager) cleanup() {
 		m.vfio = nil
 	}
 
-	// Remove disk image.
 	if m.diskPath != "" {
 		_ = m.images.RemoveDisk(m.diskPath)
 	}
 
-	// Remove QMP socket.
 	if m.qmpSocket != "" {
 		_ = os.Remove(m.qmpSocket)
 	}
@@ -502,22 +554,23 @@ func (m *Manager) cleanup() {
 	m.reset()
 }
 
-// reset zeroes all runtime state fields.
 func (m *Manager) reset() {
 	m.vmID = ""
 	m.cmd = nil
 	m.logFile = nil
 	m.vfio = nil
 	m.qmp = nil
+	m.sshClient = nil
 	m.ports = nil
 	m.diskPath = ""
 	m.qmpSocket = ""
 	m.gpuAddr = ""
 	m.sshEnabled = false
 	m.done = nil
+	m.containerID = ""
+	m.spec = nil
 }
 
-// parseSMP extracts an integer CPU count from the spec, falling back to a default.
 func parseSMP(s, fallback string) string {
 	if s == "" {
 		return fallback
@@ -532,7 +585,6 @@ func parseSMP(s, fallback string) string {
 	return s
 }
 
-// parseMemory normalizes the memory size string to QEMU format (uppercase suffix).
 func parseMemory(s, fallback string) string {
 	if s == "" {
 		return fallback
@@ -540,7 +592,6 @@ func parseMemory(s, fallback string) string {
 	return strings.ToUpper(strings.TrimSpace(s))
 }
 
-// mapQMPStatus converts a QMP status string to a domain.InstanceStatus.
 func mapQMPStatus(s string) domain.InstanceStatus {
 	switch s {
 	case "running":

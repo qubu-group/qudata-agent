@@ -1,6 +1,7 @@
 package system
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -12,10 +13,10 @@ import (
 )
 
 // StatsCollector samples GPU, CPU, RAM, and network metrics.
-// CPU utilization is computed between successive Collect() calls
-// without any internal sleep — the caller controls the sampling interval.
+// GPU metrics can come from either host NVML or VM via SSH.
 type StatsCollector struct {
-	gpu *gpu.Metrics
+	gpu       *gpu.Metrics
+	vmMetrics domain.VMGPUMetricsProvider
 
 	mu           sync.Mutex
 	prevInetIn   uint64
@@ -23,9 +24,11 @@ type StatsCollector struct {
 	prevCPUIdle  uint64
 	prevCPUTotal uint64
 	prevTime     time.Time
+
+	lastVMMetrics *domain.VMGPUMetrics
+	lastVMUpdate  time.Time
 }
 
-// NewStatsCollector creates a stats collector using the given GPU metrics.
 func NewStatsCollector(gpuMetrics *gpu.Metrics) *StatsCollector {
 	idle, total := cpuTimes()
 	inetIn, inetOut := netCounters()
@@ -39,14 +42,16 @@ func NewStatsCollector(gpuMetrics *gpu.Metrics) *StatsCollector {
 	}
 }
 
-// Collect returns a point-in-time snapshot of system metrics.
-// CPU utilization is the delta since the last Collect() call.
-// This method does NOT block.
+func (c *StatsCollector) SetVMMetricsProvider(provider domain.VMGPUMetricsProvider) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.vmMetrics = provider
+}
+
 func (c *StatsCollector) Collect() domain.StatsSnapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// CPU delta
 	idle, total := cpuTimes()
 	idleDelta := float64(idle - c.prevCPUIdle)
 	totalDelta := float64(total - c.prevCPUTotal)
@@ -57,7 +62,6 @@ func (c *StatsCollector) Collect() domain.StatsSnapshot {
 	c.prevCPUIdle = idle
 	c.prevCPUTotal = total
 
-	// Network delta
 	curIn, curOut := netCounters()
 	deltaIn := curIn - c.prevInetIn
 	deltaOut := curOut - c.prevInetOut
@@ -65,18 +69,38 @@ func (c *StatsCollector) Collect() domain.StatsSnapshot {
 	c.prevInetOut = curOut
 	c.prevTime = time.Now()
 
+	gpuUtil, gpuTemp, memUtil := c.collectGPUMetrics()
+
 	return domain.StatsSnapshot{
-		GPUUtil: c.gpu.Utilization(),
-		GPUTemp: c.gpu.Temperature(),
+		GPUUtil: gpuUtil,
+		GPUTemp: gpuTemp,
 		CPUUtil: cpuPercent,
 		RAMUtil: ramUtil(),
-		MemUtil: c.gpu.MemoryUtilization(),
+		MemUtil: memUtil,
 		InetIn:  deltaIn,
 		InetOut: deltaOut,
 	}
 }
 
-// --- CPU ---
+func (c *StatsCollector) collectGPUMetrics() (util float64, temp int, memUtil float64) {
+	if c.vmMetrics != nil && c.vmMetrics.SSHReady() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		metrics, err := c.vmMetrics.GetGPUMetrics(ctx)
+		if err == nil && metrics != nil {
+			c.lastVMMetrics = metrics
+			c.lastVMUpdate = time.Now()
+			return metrics.Utilization, metrics.Temperature, metrics.MemoryUtilization()
+		}
+
+		if c.lastVMMetrics != nil && time.Since(c.lastVMUpdate) < 5*time.Second {
+			return c.lastVMMetrics.Utilization, c.lastVMMetrics.Temperature, c.lastVMMetrics.MemoryUtilization()
+		}
+	}
+
+	return c.gpu.Utilization(), c.gpu.Temperature(), c.gpu.MemoryUtilization()
+}
 
 func cpuTimes() (idle, total uint64) {
 	data, err := os.ReadFile("/proc/stat")
@@ -87,7 +111,6 @@ func cpuTimes() (idle, total uint64) {
 	if len(lines) == 0 {
 		return 0, 0
 	}
-	// First line: "cpu  user nice system idle iowait irq softirq steal guest guest_nice"
 	fields := strings.Fields(lines[0])
 	if len(fields) < 5 {
 		return 0, 0
@@ -99,14 +122,12 @@ func cpuTimes() (idle, total uint64) {
 	for _, v := range values {
 		total += v
 	}
-	idle = values[3] // idle
+	idle = values[3]
 	if len(fields) > 5 {
-		idle += values[4] // iowait
+		idle += values[4]
 	}
 	return idle, total
 }
-
-// --- RAM ---
 
 func ramUtil() float64 {
 	data, err := os.ReadFile("/proc/meminfo")
@@ -127,8 +148,6 @@ func ramUtil() float64 {
 	}
 	return float64(memTotal-memAvailable) / float64(memTotal) * 100.0
 }
-
-// --- Network ---
 
 func netCounters() (rxBytes, txBytes uint64) {
 	data, err := os.ReadFile("/proc/net/dev")
