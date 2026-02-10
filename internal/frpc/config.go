@@ -103,32 +103,45 @@ func (c *Config) Render() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func BuildInstanceProxies(spec domain.InstanceSpec, hostPorts []int, subdomain string) []domain.FRPProxy {
-	proxies := make([]domain.FRPProxy, 0, len(spec.Ports))
-	for i, pm := range spec.Ports {
-		if i >= len(hostPorts) {
+// BuildInstanceProxies creates FRP proxy entries for a VM instance.
+// SSH gets a TCP proxy with remotePort from the SSH range (10000-15000).
+// Application ports get HTTP proxies with customDomains = ["secretDomain:remotePort"].
+func BuildInstanceProxies(spec domain.InstanceSpec, hostPorts []int, sshRemotePort int) []domain.FRPProxy {
+	var proxies []domain.FRPProxy
+	idx := 0
+
+	if spec.SSHEnabled && idx < len(hostPorts) {
+		proxies = append(proxies, domain.FRPProxy{
+			Name:       "vm-ssh",
+			Type:       "tcp",
+			LocalPort:  hostPorts[idx],
+			RemotePort: sshRemotePort,
+		})
+		idx++
+	}
+
+	for _, pm := range spec.Ports {
+		if idx >= len(hostPorts) {
 			break
 		}
-		hostPort := hostPorts[i]
-
 		proxy := domain.FRPProxy{
-			Name:      fmt.Sprintf("vm-%s-%d", pm.Proto, pm.ContainerPort),
+			Name:      fmt.Sprintf("vm-%s-%d", pm.Proto, pm.GuestPort),
 			Type:      pm.Proto,
-			LocalPort: hostPort,
+			LocalPort: hostPorts[idx],
 		}
-
 		switch pm.Proto {
 		case "tcp":
 			proxy.RemotePort = pm.RemotePort
 		case "http":
 			if pm.RemotePort > 0 {
-				proxy.CustomDomain = fmt.Sprintf("%s:%d", subdomain, pm.RemotePort)
+				proxy.CustomDomain = fmt.Sprintf("%s:%d", spec.SecretDomain, pm.RemotePort)
 			} else {
-				proxy.CustomDomain = subdomain
+				proxy.CustomDomain = spec.SecretDomain
 			}
 		}
-
 		proxies = append(proxies, proxy)
+		idx++
 	}
+
 	return proxies
 }

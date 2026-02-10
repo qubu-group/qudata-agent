@@ -1,6 +1,7 @@
 package system
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,29 +11,35 @@ import (
 	"time"
 
 	"github.com/qudata/agent/internal/domain"
-	"github.com/qudata/agent/internal/gpu"
 )
 
 // Probe collects static system information for host registration.
+// GPU data comes from a GPUInfoProvider (VM or mock); CPU/RAM/disk from the host.
 type Probe struct {
-	gpu *gpu.Metrics
+	gpuProvider domain.GPUInfoProvider
 }
 
-// NewProbe creates a system probe backed by the given GPU metrics provider.
-func NewProbe(gpuMetrics *gpu.Metrics) *Probe {
-	return &Probe{gpu: gpuMetrics}
+func NewProbe(gpuProvider domain.GPUInfoProvider) *Probe {
+	return &Probe{gpuProvider: gpuProvider}
 }
 
 // HostRegistration builds a CreateHostRequest from detected hardware.
-func (p *Probe) HostRegistration() domain.CreateHostRequest {
+func (p *Probe) HostRegistration(ctx context.Context) domain.CreateHostRequest {
 	ramGB := totalRAMGB()
 	diskGB := totalDiskGB()
 
+	gpuInfo := &domain.GPUInfo{}
+	if p.gpuProvider != nil {
+		if info, err := p.gpuProvider.GPUInfo(ctx); err == nil && info != nil {
+			gpuInfo = info
+		}
+	}
+
 	return domain.CreateHostRequest{
-		GPUName:   p.gpu.Name(),
-		GPUAmount: p.gpu.Count(),
-		VRAM:      p.gpu.VRAM(),
-		MaxCUDA:   p.gpu.MaxCUDAVersion(),
+		GPUName:   gpuInfo.Name,
+		GPUAmount: gpuInfo.Count,
+		VRAM:      gpuInfo.VRAM,
+		MaxCUDA:   gpuInfo.MaxCUDA,
 		Location:  detectLocation(),
 		Configuration: domain.HostConfig{
 			RAM:            domain.ResourceUnit{Amount: ramGB, Unit: "gb"},
@@ -40,14 +47,9 @@ func (p *Probe) HostRegistration() domain.CreateHostRequest {
 			CPUName:        cpuName(),
 			CPUCores:       runtime.NumCPU(),
 			CPUFreq:        cpuFreqGHz(),
-			MaxCUDAVersion: p.gpu.MaxCUDAVersion(),
+			MaxCUDAVersion: gpuInfo.MaxCUDA,
 		},
 	}
-}
-
-// Fingerprint returns a unique machine fingerprint.
-func (p *Probe) Fingerprint() string {
-	return p.gpu.GetFingerprint()
 }
 
 // PublicIP detects the public IPv4 address of this machine.
@@ -90,13 +92,6 @@ func totalRAMGB() float64 {
 }
 
 func totalDiskGB() float64 {
-	// Use /proc/partitions or statvfs for root filesystem
-	var stat struct {
-		Bavail uint64
-		Bsize  uint64
-		Blocks uint64
-	}
-	// Simple fallback: read from df-like mechanism
 	data, err := os.ReadFile("/proc/partitions")
 	if err != nil {
 		return 0
@@ -108,18 +103,15 @@ func totalDiskGB() float64 {
 			var blocks uint64
 			fmt.Sscanf(fields[2], "%d", &blocks)
 			name := fields[3]
-			// Only count whole disks (sda, nvme0n1, vda), not partitions
 			if isWholeDisk(name) {
 				totalKB += blocks
 			}
 		}
 	}
-	_ = stat
 	return float64(totalKB) / (1024 * 1024)
 }
 
 func isWholeDisk(name string) bool {
-	// sda, sdb, vda, nvme0n1 — but not sda1, nvme0n1p1
 	if strings.HasPrefix(name, "sd") && len(name) == 3 {
 		return true
 	}
@@ -167,7 +159,6 @@ func cpuFreqGHz() float64 {
 }
 
 func detectLocation() domain.HostLocation {
-	// Default location; can be enhanced with GeoIP later.
 	return domain.HostLocation{
 		City:    "",
 		Country: "",

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/qudata/agent/internal/config"
@@ -24,14 +25,12 @@ type Agent struct {
 	cfg    *config.Config
 	logger *slog.Logger
 
-	store      *storage.Store
-	api        *qudata.Client
-	vm         domain.VMManager
-	frpcProc   *frpc.Process
-	ports      *network.PortAllocator
-	probe      *system.Probe
-	stats      *system.StatsCollector
-	gpuMetrics *gpu.Metrics
+	store    *storage.Store
+	api      *qudata.Client
+	mgr      *qemu.Manager
+	frpcProc *frpc.Process
+	ports    *network.PortAllocator
+	stats    *system.StatsCollector
 
 	httpServer *server.Server
 	meta       *domain.AgentMetadata
@@ -43,33 +42,6 @@ func New(cfg *config.Config, logger *slog.Logger) (*Agent, error) {
 		return nil, fmt.Errorf("init storage: %w", err)
 	}
 
-	gpuMetrics := gpu.NewMetrics(cfg.Debug, logger)
-	probe := system.NewProbe(gpuMetrics)
-	statsCollector := system.NewStatsCollector(gpuMetrics)
-	api := qudata.NewClient(cfg.APIKey, cfg.ServiceURL, logger)
-	frpcProc := frpc.NewProcess(cfg.FRPCBinary, cfg.FRPCConfigPath, logger)
-	portAlloc := network.NewPortAllocator()
-
-	vm, err := newVMManager(cfg, logger, statsCollector)
-	if err != nil {
-		return nil, fmt.Errorf("init vm backend: %w", err)
-	}
-
-	return &Agent{
-		cfg:        cfg,
-		logger:     logger,
-		store:      store,
-		api:        api,
-		vm:         vm,
-		frpcProc:   frpcProc,
-		ports:      portAlloc,
-		probe:      probe,
-		stats:      statsCollector,
-		gpuMetrics: gpuMetrics,
-	}, nil
-}
-
-func newVMManager(cfg *config.Config, logger *slog.Logger, stats *system.StatsCollector) (domain.VMManager, error) {
 	sshKeyPath := cfg.ManagementKeyPath
 	if sshKeyPath == "" {
 		keyPair, err := ssh.EnsureManagementKey(cfg.DataDir + "/.ssh")
@@ -81,20 +53,36 @@ func newVMManager(cfg *config.Config, logger *slog.Logger, stats *system.StatsCo
 	}
 
 	mgr := qemu.NewManager(qemu.Config{
-		QEMUBinary:     cfg.QEMUBinary,
-		OVMFPath:       cfg.OVMFPath,
-		BaseImagePath:  cfg.BaseImagePath,
-		ImageDir:       cfg.ImageDir,
-		RunDir:         cfg.VMRunDir,
-		DefaultGPUAddr: cfg.GPUPCIAddr,
-		SSHKeyPath:     sshKeyPath,
+		QEMUBinary:    cfg.QEMUBinary,
+		OVMFPath:      cfg.OVMFPath,
+		BaseImagePath: cfg.BaseImagePath,
+		ImageDir:      cfg.ImageDir,
+		RunDir:        cfg.VMRunDir,
+		DefaultGPU:    cfg.GPUPCIAddr,
+		SSHKeyPath:    sshKeyPath,
+		DefaultCPUs:   cfg.VMDefaultCPUs,
+		DefaultMemory: cfg.VMDefaultMemory,
+		DiskSizeGB:    cfg.VMDiskSizeGB,
 	}, logger)
 
-	stats.SetVMMetricsProvider(mgr)
-	return mgr, nil
+	api := qudata.NewClient(cfg.APIKey, cfg.ServiceURL, logger)
+	frpcProc := frpc.NewProcess(cfg.FRPCBinary, cfg.FRPCConfigPath, logger)
+	portAlloc := network.NewPortAllocator()
+
+	return &Agent{
+		cfg:      cfg,
+		logger:   logger,
+		store:    store,
+		api:      api,
+		mgr:      mgr,
+		frpcProc: frpcProc,
+		ports:    portAlloc,
+	}, nil
 }
 
 func (a *Agent) Run(ctx context.Context) error {
+	a.mgr.KillOrphans()
+
 	meta, err := a.bootstrap(ctx)
 	if err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
@@ -105,22 +93,38 @@ func (a *Agent) Run(ctx context.Context) error {
 		if err := a.frpcProc.Start(meta.FRP, meta.Port); err != nil {
 			return fmt.Errorf("start frpc: %w", err)
 		}
-		a.logger.Info("FRPC tunnel established", "server", meta.FRP.ServerAddr, "subdomain", meta.FRP.Subdomain)
+		a.logger.Info("frpc tunnel established", "server", meta.FRP.ServerAddr, "subdomain", meta.FRP.Subdomain)
 	} else {
-		a.logger.Warn("no FRP info received from API, running without tunnel")
+		a.logger.Warn("no FRP info, running without tunnel")
 	}
 
-	if err := a.restoreState(ctx); err != nil {
-		a.logger.Warn("failed to restore instance state", "err", err)
+	_ = a.store.ClearInstanceState()
+
+	if !meta.HostExists {
+		var gpuProvider domain.GPUInfoProvider
+		if a.cfg.Debug {
+			gpuProvider = gpu.MockInfoProvider{}
+		} else {
+			gpuProvider = &gpu.HostInfoProvider{
+				Metrics: gpu.NewMetrics(a.cfg.Debug, a.logger),
+			}
+		}
+		probe := system.NewProbe(gpuProvider)
+		hostReq := probe.HostRegistration(ctx)
+		a.logger.Info("registering host", "gpu", hostReq.GPUName, "gpu_count", hostReq.GPUAmount, "vram", hostReq.VRAM)
+		if err := a.api.RegisterHost(ctx, hostReq); err != nil {
+			return fmt.Errorf("register host: %w", err)
+		}
 	}
 
+	a.stats = system.NewStatsCollector(a.mgr)
 	go a.publishStats(ctx)
 
 	a.httpServer = server.New(
 		meta.Port,
 		meta.SecretKey,
-		a.subdomain(),
-		a.vm,
+		meta.Subdomain(),
+		a.mgr,
 		a.frpcProc,
 		a.ports,
 		a.store,
@@ -131,13 +135,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		"version", config.Version,
 		"agent_id", meta.ID,
 		"port", meta.Port,
-		"address", meta.Address,
 	)
 
 	errCh := make(chan error, 1)
-	go func() {
-		errCh <- a.httpServer.Start()
-	}()
+	go func() { errCh <- a.httpServer.Start() }()
 
 	select {
 	case <-ctx.Done():
@@ -160,9 +161,9 @@ func (a *Agent) bootstrap(ctx context.Context) (*domain.AgentMetadata, error) {
 	}
 
 	address := system.PublicIP()
-	fingerprint := a.probe.Fingerprint()
+	fingerprint := machineFingerprint()
 
-	a.logger.Info("pinging Qudata API", "url", a.cfg.ServiceURL)
+	a.logger.Info("pinging API", "url", a.cfg.ServiceURL)
 	if err := a.api.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("api ping: %w", err)
 	}
@@ -176,7 +177,7 @@ func (a *Agent) bootstrap(ctx context.Context) (*domain.AgentMetadata, error) {
 		Version:     config.Version,
 	}
 
-	a.logger.Info("initializing agent with API", "agent_id", agentID, "port", agentPort)
+	a.logger.Info("initializing agent", "agent_id", agentID, "port", agentPort)
 
 	initResp, err := a.api.InitAgent(ctx, initReq)
 	if err != nil {
@@ -185,9 +186,7 @@ func (a *Agent) bootstrap(ctx context.Context) (*domain.AgentMetadata, error) {
 
 	secretKey := initResp.SecretKey
 	if secretKey != "" {
-		if err := a.store.SaveSecret(secretKey); err != nil {
-			a.logger.Warn("failed to save secret", "err", err)
-		}
+		_ = a.store.SaveSecret(secretKey)
 		a.api.UseSecret(secretKey)
 	} else {
 		secretKey, _ = a.store.Secret()
@@ -197,63 +196,21 @@ func (a *Agent) bootstrap(ctx context.Context) (*domain.AgentMetadata, error) {
 	}
 
 	if initResp.FRP != nil {
-		if err := a.store.SaveFRPInfo(initResp.FRP); err != nil {
-			a.logger.Warn("failed to save FRP info", "err", err)
-		}
+		_ = a.store.SaveFRPInfo(initResp.FRP)
 	} else {
 		initResp.FRP, _ = a.store.FRPInfo()
 	}
 
-	if !initResp.HostExists {
-		hostReq := a.probe.HostRegistration()
-		a.logger.Info("registering host", "gpu", hostReq.GPUName, "gpu_count", hostReq.GPUAmount, "vram", hostReq.VRAM)
-		if err := a.api.RegisterHost(ctx, hostReq); err != nil {
-			return nil, fmt.Errorf("register host: %w", err)
-		}
-	}
-
-	if err := a.store.SaveAPIKey(a.cfg.APIKey); err != nil {
-		a.logger.Warn("failed to save api key", "err", err)
-	}
+	_ = a.store.SaveAPIKey(a.cfg.APIKey)
 
 	return &domain.AgentMetadata{
-		ID:          agentID,
-		Port:        agentPort,
-		Address:     address,
-		Fingerprint: fingerprint,
-		SecretKey:   secretKey,
-		FRP:         initResp.FRP,
+		ID:         agentID,
+		Port:       agentPort,
+		Address:    address,
+		SecretKey:  secretKey,
+		FRP:        initResp.FRP,
+		HostExists: initResp.HostExists,
 	}, nil
-}
-
-func (a *Agent) restoreState(ctx context.Context) error {
-	state, err := a.store.LoadInstanceState()
-	if err != nil {
-		return fmt.Errorf("load instance state: %w", err)
-	}
-	if state == nil {
-		return nil
-	}
-
-	a.logger.Info("restoring instance state", "vm_id", state.ContainerID, "ports", state.Ports)
-
-	a.vm.RestoreState(state)
-
-	status := a.vm.Status(ctx)
-	if status == domain.StatusDestroyed || status == domain.StatusError {
-		a.logger.Warn("saved instance is not running, clearing state")
-		a.vm.RestoreState(nil)
-		_ = a.store.ClearInstanceState()
-		return nil
-	}
-
-	if len(state.FRPProxies) > 0 {
-		if err := a.frpcProc.UpdateInstanceProxies(state.FRPProxies); err != nil {
-			a.logger.Warn("failed to restore frpc proxies", "err", err)
-		}
-	}
-
-	return nil
 }
 
 func (a *Agent) publishStats(ctx context.Context) {
@@ -266,27 +223,11 @@ func (a *Agent) publishStats(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			snap := a.stats.Collect()
-			status := a.vm.Status(ctx)
-
-			report := domain.StatsReport{
-				StatsSnapshot: snap,
-				Status:        status,
-			}
-
+			report := a.stats.Collect(ctx)
 			if err := a.api.SendStats(ctx, report); err != nil {
 				if count%40 == 0 {
 					a.logger.Warn("failed to send stats", "err", err)
 				}
-			}
-
-			if count%20 == 0 && status == domain.StatusRunning {
-				a.logger.Info("stats",
-					"gpu_util", snap.GPUUtil,
-					"gpu_temp", snap.GPUTemp,
-					"cpu_util", fmt.Sprintf("%.1f%%", snap.CPUUtil),
-					"ram_util", fmt.Sprintf("%.1f%%", snap.RAMUtil),
-				)
 			}
 			count++
 		}
@@ -294,7 +235,7 @@ func (a *Agent) publishStats(ctx context.Context) {
 }
 
 func (a *Agent) shutdown() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if a.httpServer != nil {
@@ -307,13 +248,20 @@ func (a *Agent) shutdown() error {
 		a.logger.Error("frpc stop error", "err", err)
 	}
 
+	if !a.cfg.Debug {
+		if err := a.mgr.Stop(ctx); err != nil {
+			a.logger.Error("VM stop error", "err", err)
+		}
+	}
+
 	a.logger.Info("agent stopped")
 	return nil
 }
 
-func (a *Agent) subdomain() string {
-	if a.meta != nil && a.meta.FRP != nil {
-		return a.meta.FRP.Subdomain
+func machineFingerprint() string {
+	data, err := os.ReadFile("/etc/machine-id")
+	if err != nil {
+		return "unknown"
 	}
-	return ""
+	return strings.TrimSpace(string(data))
 }

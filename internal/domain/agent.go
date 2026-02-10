@@ -1,6 +1,5 @@
 package domain
 
-// InitAgentRequest is sent to the Qudata API during agent bootstrap.
 type InitAgentRequest struct {
 	AgentID     string `json:"agent_id"`
 	AgentPort   int    `json:"agent_port"`
@@ -10,7 +9,6 @@ type InitAgentRequest struct {
 	Version     string `json:"version"`
 }
 
-// InitAgentResponse is returned by the Qudata API after agent init.
 type InitAgentResponse struct {
 	OK   bool              `json:"ok"`
 	Data InitAgentRespData `json:"data"`
@@ -25,7 +23,6 @@ type InitAgentRespData struct {
 	FRP             *FRPInfo `json:"frp,omitempty"`
 }
 
-// FRPInfo contains FRP server connection details returned by the API.
 type FRPInfo struct {
 	ServerAddr string `json:"server_addr"`
 	ServerPort int    `json:"server_port"`
@@ -33,12 +30,18 @@ type FRPInfo struct {
 	Subdomain  string `json:"subdomain"`
 }
 
-// AgentMetadata holds runtime metadata for the running agent.
 type AgentMetadata struct {
-	ID          string
-	Port        int
-	Address     string
-	Fingerprint string
-	SecretKey   string
-	FRP         *FRPInfo
+	ID         string
+	Port       int
+	Address    string
+	SecretKey  string
+	FRP        *FRPInfo
+	HostExists bool
+}
+
+func (m *AgentMetadata) Subdomain() string {
+	if m != nil && m.FRP != nil {
+		return m.FRP.Subdomain
+	}
+	return ""
 }

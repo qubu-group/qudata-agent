@@ -1,47 +1,42 @@
 # QEMU VM с VFIO GPU Passthrough
 
-> **Статус: РЕАЛИЗОВАНО**
-
 ## Архитектура
 
 ```
-┌─────────────────────────────────────────────────┐
-│                    Хост                          │
-│  ┌─────────────────────────────────────────────┐ │
-│  │              qudata-agent                   │ │
-│  │  - Запускает VM при старте                  │ │
-│  │  - Управляет контейнерами через SSH         │ │
-│  │  - Собирает метрики из VM                   │ │
-│  └─────────────────────────────────────────────┘ │
-│                      │                           │
-│              VFIO passthrough                    │
-│                      ▼                           │
-│  ┌─────────────────────────────────────────────┐ │
-│  │                 QEMU VM                      │ │
-│  │  ┌─────────────────────────────────────────┐ │ │
-│  │  │              Docker                      │ │ │
-│  │  │  ┌───────────────────────────────────┐  │ │ │
-│  │  │  │       User Container              │  │ │ │
-│  │  │  │  (JupyterLab, training, etc)      │  │ │ │
-│  │  │  └───────────────────────────────────┘  │ │ │
-│  │  └─────────────────────────────────────────┘ │ │
-│  │               GPU (все)                      │ │
-│  └─────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│                  Хост                         │
+│  ┌──────────────────────────────────────────┐ │
+│  │            qudata-agent                  │ │
+│  │  - Создаёт VM по запросу                 │ │
+│  │  - GPU bind при создании, unbind при     │ │
+│  │    удалении                              │ │
+│  │  - SSH/QMP управление VM                 │ │
+│  └──────────────────────────────────────────┘ │
+│                    │                          │
+│            VFIO passthrough                   │
+│                    ▼                          │
+│  ┌──────────────────────────────────────────┐ │
+│  │             Ubuntu VM                    │ │
+│  │  ┌──────────────────────────────────┐    │ │
+│  │  │    Пользовательские приложения   │    │ │
+│  │  │    (JupyterLab, training, etc)   │    │ │
+│  │  └──────────────────────────────────┘    │ │
+│  │             GPU (VFIO)                   │ │
+│  └──────────────────────────────────────────┘ │
+└──────────────────────────────────────────────┘
 ```
 
 ## Установка
 
-Одна команда:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/qubu-group/qudata-agent/main/install.sh | sudo bash -s -- ak-YOUR-API-KEY
 ```
 
 Установщик:
-1. Определяет все NVIDIA GPU
+1. Определяет NVIDIA GPU
 2. Настраивает IOMMU в GRUB
-3. Скачивает Debian cloud image
-4. Кастомизирует образ (NVIDIA driver, Docker, SSH)
+3. Скачивает Ubuntu cloud image
+4. Устанавливает NVIDIA driver + SSH в образ
 5. Перезагружает систему
 6. Запускает агент
 
@@ -49,21 +44,22 @@ curl -fsSL https://raw.githubusercontent.com/qubu-group/qudata-agent/main/instal
 
 ### internal/qemu/
 
-- `manager.go` — управление VM lifecycle
-- `ssh.go` — SSH клиент для взаимодействия с VM
-- `vfio.go` — VFIO binding/unbinding GPU
+- `manager.go` — lifecycle VM: Create/Stop/Manage/Status
+- `ssh.go` — SSH клиент для VM
+- `vfio.go` — VFIO bind/unbind GPU
 - `monitor.go` — QMP протокол
-- `recovery.go` — восстановление после краша
+- `recovery.go` — поиск и убийство orphan VM
 
-### scripts/
+### internal/frpc/
 
-- `install.py` — полная автоматизация установки
+- `config.go` — генерация frpc.toml с TCP/HTTP прокси
+- `process.go` — управление процессом frpc
 
 ## Переменные окружения
 
 | Переменная | Описание |
 |-----------|----------|
 | `QUDATA_API_KEY` | API ключ |
-| `QUDATA_GPU_PCI_ADDRS` | PCI адреса GPU (auto-detect) |
+| `QUDATA_GPU_PCI_ADDRS` | PCI адреса GPU |
 | `QUDATA_BASE_IMAGE` | Путь к образу VM |
 | `QUDATA_DEBUG` | Debug mode без GPU |

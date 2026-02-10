@@ -2,55 +2,57 @@ package network
 
 import (
 	"fmt"
+	"math/rand"
 	"net"
 	"sync"
 )
 
-// PortAllocator manages dynamic allocation of free host ports.
+const (
+	SSHPortMin = 10000
+	SSHPortMax = 15000
+	AppPortMin = 15001
+	AppPortMax = 65535
+)
+
 type PortAllocator struct {
 	mu        sync.Mutex
 	allocated map[int]struct{}
 }
 
-// NewPortAllocator creates a new port allocator.
 func NewPortAllocator() *PortAllocator {
-	return &PortAllocator{
-		allocated: make(map[int]struct{}),
-	}
+	return &PortAllocator{allocated: make(map[int]struct{})}
 }
 
-// Allocate finds and reserves n free ports on the host.
-// It uses the OS to find actually available ports.
-func (a *PortAllocator) Allocate(n int) ([]int, error) {
+func (a *PortAllocator) AllocateSSHPort() (int, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.allocateFromRange(SSHPortMin, SSHPortMax)
+}
+
+func (a *PortAllocator) AllocateAppPorts(n int) ([]int, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	ports := make([]int, 0, n)
 	for i := 0; i < n; i++ {
-		port, err := findFreePort()
+		p, err := a.allocateFromRange(AppPortMin, AppPortMax)
 		if err != nil {
-			// Release any ports we already allocated in this batch
-			for _, p := range ports {
-				delete(a.allocated, p)
+			for _, allocated := range ports {
+				delete(a.allocated, allocated)
 			}
-			return nil, fmt.Errorf("allocate port %d/%d: %w", i+1, n, err)
+			return nil, fmt.Errorf("allocate app port %d/%d: %w", i+1, n, err)
 		}
-		ports = append(ports, port)
-		a.allocated[port] = struct{}{}
+		ports = append(ports, p)
 	}
 	return ports, nil
 }
 
-// AllocateOne finds and reserves a single free port.
 func (a *PortAllocator) AllocateOne() (int, error) {
-	ports, err := a.Allocate(1)
-	if err != nil {
-		return 0, err
-	}
-	return ports[0], nil
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.allocateFromRange(AppPortMin, AppPortMax)
 }
 
-// Release marks ports as no longer in use.
 func (a *PortAllocator) Release(ports ...int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -59,12 +61,27 @@ func (a *PortAllocator) Release(ports ...int) {
 	}
 }
 
-// findFreePort asks the OS for an available port by binding to :0.
-func findFreePort() (int, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, fmt.Errorf("listen on :0: %w", err)
+func (a *PortAllocator) allocateFromRange(min, max int) (int, error) {
+	start := min + rand.Intn(max-min+1)
+	for i := 0; i <= max-min; i++ {
+		port := min + (start-min+i)%(max-min+1)
+		if _, taken := a.allocated[port]; taken {
+			continue
+		}
+		if !isPortFree(port) {
+			continue
+		}
+		a.allocated[port] = struct{}{}
+		return port, nil
 	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port, nil
+	return 0, fmt.Errorf("no free port in range %d-%d", min, max)
+}
+
+func isPortFree(port int) bool {
+	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return false
+	}
+	l.Close()
+	return true
 }

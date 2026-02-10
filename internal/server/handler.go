@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/qudata/agent/internal/domain"
@@ -12,63 +13,49 @@ import (
 	"github.com/qudata/agent/internal/storage"
 )
 
-// Handler implements all HTTP endpoint handlers.
 type Handler struct {
-	vm        domain.VMManager
-	frpc      *frpc.Process
-	ports     *network.PortAllocator
-	store     *storage.Store
-	logger    *slog.Logger
-	subdomain string
+	vm     domain.VMManager
+	frpc   *frpc.Process
+	ports  *network.PortAllocator
+	store  *storage.Store
+	logger *slog.Logger
 }
 
-// NewHandler creates a new request handler.
 func NewHandler(
 	vm domain.VMManager,
 	frpc *frpc.Process,
 	ports *network.PortAllocator,
 	store *storage.Store,
 	logger *slog.Logger,
-	subdomain string,
 ) *Handler {
 	return &Handler{
-		vm:        vm,
-		frpc:      frpc,
-		ports:     ports,
-		store:     store,
-		logger:    logger,
-		subdomain: subdomain,
+		vm:     vm,
+		frpc:   frpc,
+		ports:  ports,
+		store:  store,
+		logger: logger,
 	}
 }
 
-// Ping is a health-check endpoint.
 func (h *Handler) Ping(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-// createInstanceRequest is the JSON body for POST /instances.
 type createInstanceRequest struct {
-	Image      string            `json:"image" binding:"required"`
-	ImageTag   string            `json:"image_tag"`
-	Registry   string            `json:"registry"`
-	Login      string            `json:"login"`
-	Password   string            `json:"password"`
-	EnvVars    map[string]string `json:"env_variables"`
-	Ports      []portRequest     `json:"ports" binding:"required"`
-	Command    string            `json:"command"`
-	SSHEnabled bool              `json:"ssh_enabled"`
-	StorageGB  int               `json:"storage_gb"`
-	GPUAddr    string            `json:"gpu_addr"`
-	DiskSizeGB int               `json:"disk_size_gb"`
+	Ports        []portRequest `json:"ports" binding:"required"`
+	SSHEnabled   bool          `json:"ssh_enabled"`
+	SecretDomain string        `json:"secret_domain" binding:"required"`
+	DiskSizeGB   int           `json:"disk_size_gb"`
+	CPUs         string        `json:"cpus"`
+	Memory       string        `json:"memory"`
 }
 
 type portRequest struct {
-	ContainerPort int    `json:"container_port" binding:"required"`
-	RemotePort    int    `json:"remote_port" binding:"required"`
-	Proto         string `json:"proto" binding:"required"`
+	GuestPort  int    `json:"guest_port" binding:"required"`
+	RemotePort int    `json:"remote_port" binding:"required"`
+	Proto      string `json:"proto" binding:"required"`
 }
 
-// CreateInstance provisions a new VM instance asynchronously.
 func (h *Handler) CreateInstance(c *gin.Context) {
 	var req createInstanceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -77,37 +64,63 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 	}
 
 	spec := domain.InstanceSpec{
-		Image:      req.Image,
-		ImageTag:   req.ImageTag,
-		Registry:   req.Registry,
-		Login:      req.Login,
-		Password:   req.Password,
-		EnvVars:    req.EnvVars,
-		Command:    req.Command,
-		SSHEnabled: req.SSHEnabled,
-		StorageGB:  req.StorageGB,
-		GPUAddr:    req.GPUAddr,
-		DiskSizeGB: req.DiskSizeGB,
+		SSHEnabled:   req.SSHEnabled,
+		SecretDomain: req.SecretDomain,
+		DiskSizeGB:   req.DiskSizeGB,
+		CPUs:         req.CPUs,
+		Memory:       req.Memory,
 	}
 	for _, p := range req.Ports {
 		spec.Ports = append(spec.Ports, domain.PortMapping{
-			ContainerPort: p.ContainerPort,
-			RemotePort:    p.RemotePort,
-			Proto:         p.Proto,
+			GuestPort:  p.GuestPort,
+			RemotePort: p.RemotePort,
+			Proto:      p.Proto,
 		})
 	}
 
-	hostPorts, err := h.ports.Allocate(len(spec.Ports))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "port allocation failed: " + err.Error()})
-		return
+	portsNeeded := len(spec.Ports)
+	if spec.SSHEnabled {
+		portsNeeded++
 	}
 
-	go h.startInstance(context.Background(), spec, hostPorts)
+	var hostPorts []int
+	var sshRemotePort int
 
-	portResult := make(map[int]int)
+	if spec.SSHEnabled {
+		sshPort, err := h.ports.AllocateSSHPort()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "ssh port allocation: " + err.Error()})
+			return
+		}
+		sshRemotePort = sshPort
+
+		localSSHPort, err := h.ports.AllocateAppPorts(1)
+		if err != nil {
+			h.ports.Release(sshPort)
+			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "local ssh port allocation: " + err.Error()})
+			return
+		}
+		hostPorts = append(hostPorts, localSSHPort[0])
+	}
+
+	if len(spec.Ports) > 0 {
+		appPorts, err := h.ports.AllocateAppPorts(len(spec.Ports))
+		if err != nil {
+			h.ports.Release(hostPorts...)
+			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "app port allocation: " + err.Error()})
+			return
+		}
+		hostPorts = append(hostPorts, appPorts...)
+	}
+
+	go h.startInstance(context.Background(), spec, hostPorts, sshRemotePort)
+
+	portResult := make(map[string]int)
+	if spec.SSHEnabled {
+		portResult["ssh"] = sshRemotePort
+	}
 	for _, pm := range spec.Ports {
-		portResult[pm.ContainerPort] = pm.RemotePort
+		portResult[strconv.Itoa(pm.GuestPort)] = pm.RemotePort
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -116,34 +129,33 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 	})
 }
 
-func (h *Handler) startInstance(ctx context.Context, spec domain.InstanceSpec, hostPorts []int) {
+func (h *Handler) startInstance(ctx context.Context, spec domain.InstanceSpec, hostPorts []int, sshRemotePort int) {
 	portMap, err := h.vm.Create(ctx, spec, hostPorts)
 	if err != nil {
 		h.logger.Error("failed to create instance", "err", err)
 		return
 	}
 
-	frpProxies := frpc.BuildInstanceProxies(spec, hostPorts, h.subdomain)
+	frpProxies := frpc.BuildInstanceProxies(spec, hostPorts, sshRemotePort)
 	if err := h.frpc.UpdateInstanceProxies(frpProxies); err != nil {
 		h.logger.Error("failed to update frpc proxies", "err", err)
 	}
 
 	state := &domain.InstanceState{
-		ContainerID: h.vm.VMID(),
-		Image:       spec.Image,
-		Ports:       portMap,
-		FRPProxies:  frpProxies,
-		SSHEnabled:  spec.SSHEnabled,
-		GPUAddr:     spec.GPUAddr,
+		VMID:         h.vm.VMID(),
+		Ports:        portMap,
+		FRPProxies:   frpProxies,
+		SSHEnabled:   spec.SSHEnabled,
+		GPUAddr:      spec.GPUAddr,
+		SecretDomain: spec.SecretDomain,
 	}
 	if err := h.store.SaveInstanceState(state); err != nil {
 		h.logger.Error("failed to save instance state", "err", err)
 	}
 
-	h.logger.Info("instance created successfully", "ports", portMap)
+	h.logger.Info("instance created", "vm_id", h.vm.VMID(), "ports", portMap)
 }
 
-// GetInstance returns the current instance status.
 func (h *Handler) GetInstance(c *gin.Context) {
 	status := h.vm.Status(c.Request.Context())
 	c.JSON(http.StatusOK, gin.H{
@@ -156,7 +168,6 @@ type manageInstanceRequest struct {
 	Command string `json:"command" binding:"required"`
 }
 
-// ManageInstance executes a lifecycle command on the running instance.
 func (h *Handler) ManageInstance(c *gin.Context) {
 	var req manageInstanceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -180,7 +191,6 @@ func (h *Handler) ManageInstance(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-// DeleteInstance stops and removes the running instance.
 func (h *Handler) DeleteInstance(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -203,34 +213,28 @@ type sshRequest struct {
 	SSHPubkey string `json:"ssh_pubkey" binding:"required"`
 }
 
-// AddSSH installs an SSH public key in the running instance.
 func (h *Handler) AddSSH(c *gin.Context) {
 	var req sshRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
-
 	if err := h.vm.AddSSHKey(c.Request.Context(), req.SSHPubkey); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-// RemoveSSH removes an SSH public key from the running instance.
 func (h *Handler) RemoveSSH(c *gin.Context) {
 	var req sshRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
-
 	if err := h.vm.RemoveSSHKey(c.Request.Context(), req.SSHPubkey); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

@@ -29,19 +29,26 @@ type Config struct {
 	VMRunDir          string
 	GPUPCIAddr        string
 	ManagementKeyPath string
+
+	VMDefaultCPUs   string
+	VMDefaultMemory string
+	VMDiskSizeGB    int
 }
 
 func DefaultConfig() *Config {
 	return &Config{
-		ServiceURL:     "https://internal.qudata.ai/v0",
-		DataDir:        "/var/lib/qudata",
-		LogDir:         "/var/log/qudata",
-		FRPCBinary:     "/usr/local/bin/frpc",
-		FRPCConfigPath: "/etc/qudata/frpc.toml",
-		QEMUBinary:     "/usr/bin/qemu-system-x86_64",
-		OVMFPath:       "/usr/share/OVMF/OVMF_CODE.fd",
-		ImageDir:       "/var/lib/qudata/images",
-		VMRunDir:       "/var/run/qudata",
+		ServiceURL:      "https://internal.qudata.ai/v0",
+		DataDir:         "/var/lib/qudata",
+		LogDir:          "/var/log/qudata",
+		FRPCBinary:      "/usr/local/bin/frpc",
+		FRPCConfigPath:  "/etc/qudata/frpc.toml",
+		QEMUBinary:      "/usr/bin/qemu-system-x86_64",
+		OVMFPath:        "/usr/share/OVMF/OVMF_CODE.fd",
+		ImageDir:        "/var/lib/qudata/images",
+		VMRunDir:        "/var/run/qudata",
+		VMDefaultCPUs:   "4",
+		VMDefaultMemory: "8G",
+		VMDiskSizeGB:    50,
 	}
 }
 
@@ -86,7 +93,6 @@ func Load() (*Config, error) {
 	if v := os.Getenv("QUDATA_VM_RUN_DIR"); v != "" {
 		cfg.VMRunDir = v
 	}
-	// Support both singular (legacy) and plural (install script)
 	if v := os.Getenv("QUDATA_GPU_PCI_ADDR"); v != "" {
 		cfg.GPUPCIAddr = strings.TrimSpace(v)
 	}
@@ -98,6 +104,12 @@ func Load() (*Config, error) {
 	}
 	if v := os.Getenv("QUDATA_MANAGEMENT_KEY"); v != "" {
 		cfg.ManagementKeyPath = v
+	}
+	if v := os.Getenv("QUDATA_VM_CPUS"); v != "" {
+		cfg.VMDefaultCPUs = v
+	}
+	if v := os.Getenv("QUDATA_VM_MEMORY"); v != "" {
+		cfg.VMDefaultMemory = v
 	}
 
 	cfg.Debug = os.Getenv("QUDATA_DEBUG") == "true"

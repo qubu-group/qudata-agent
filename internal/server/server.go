@@ -14,13 +14,11 @@ import (
 	"github.com/qudata/agent/internal/storage"
 )
 
-// Server wraps the HTTP server with routing and middleware.
 type Server struct {
 	httpServer *http.Server
 	logger     *slog.Logger
 }
 
-// New creates a configured HTTP server listening on the given port.
 func New(
 	port int,
 	secret string,
@@ -38,7 +36,7 @@ func New(
 	router.Use(LoggingMiddleware(logger))
 	router.Use(AuthMiddleware(secret))
 
-	h := NewHandler(vm, frpcProc, ports, store, logger, subdomain)
+	h := NewHandler(vm, frpcProc, ports, store, logger)
 
 	router.GET("/ping", h.Ping)
 	router.GET("/instances", h.GetInstance)
@@ -60,7 +58,6 @@ func New(
 	}
 }
 
-// Start begins serving HTTP requests. Blocks until the server stops.
 func (s *Server) Start() error {
 	s.logger.Info("HTTP server starting", "addr", s.httpServer.Addr)
 	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -69,7 +66,6 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.logger.Info("HTTP server shutting down")
 	return s.httpServer.Shutdown(ctx)
