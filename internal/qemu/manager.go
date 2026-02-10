@@ -19,7 +19,8 @@ import (
 
 type Config struct {
 	QEMUBinary    string
-	OVMFPath      string
+	OVMFCodePath  string
+	OVMFVarsPath  string
 	BaseImagePath string
 	ImageDir      string
 	RunDir        string
@@ -31,30 +32,32 @@ type Config struct {
 }
 
 type Manager struct {
-	logger     *slog.Logger
-	qemuBin    string
-	ovmfPath   string
-	baseImage  string
-	defaultGPU string
-	runDir     string
-	sshKeyPath string
-	defaultCPU string
-	defaultMem string
-	diskSizeGB int
-	images     *ImageManager
+	logger       *slog.Logger
+	qemuBin      string
+	ovmfCode     string
+	ovmfVarsTmpl string
+	baseImage    string
+	defaultGPU   string
+	runDir       string
+	sshKeyPath   string
+	defaultCPU   string
+	defaultMem   string
+	diskSizeGB   int
+	images       *ImageManager
 
-	mu        sync.Mutex
-	vmID      string
-	cmd       *exec.Cmd
-	logFile   *os.File
-	vfio      *VFIO
-	qmp       *QMPClient
-	sshClient *SSHClient
-	diskPath  string
-	qmpSocket string
-	gpuAddr   string
-	done      chan struct{}
-	portPool  map[int]int
+	mu           sync.Mutex
+	vmID         string
+	cmd          *exec.Cmd
+	logFile      *os.File
+	vfio         *VFIO
+	qmp          *QMPClient
+	sshClient    *SSHClient
+	diskPath     string
+	qmpSocket    string
+	gpuAddr      string
+	ovmfVarsPath string
+	done         chan struct{}
+	portPool     map[int]int
 }
 
 func NewManager(cfg Config, logger *slog.Logger) *Manager {
@@ -72,17 +75,18 @@ func NewManager(cfg Config, logger *slog.Logger) *Manager {
 	}
 
 	return &Manager{
-		logger:     logger,
-		qemuBin:    cfg.QEMUBinary,
-		ovmfPath:   cfg.OVMFPath,
-		baseImage:  cfg.BaseImagePath,
-		defaultGPU: cfg.DefaultGPU,
-		runDir:     cfg.RunDir,
-		sshKeyPath: cfg.SSHKeyPath,
-		defaultCPU: cpus,
-		defaultMem: mem,
-		diskSizeGB: diskGB,
-		images:     NewImageManager(cfg.ImageDir),
+		logger:       logger,
+		qemuBin:      cfg.QEMUBinary,
+		ovmfCode:     cfg.OVMFCodePath,
+		ovmfVarsTmpl: cfg.OVMFVarsPath,
+		baseImage:    cfg.BaseImagePath,
+		defaultGPU:   cfg.DefaultGPU,
+		runDir:       cfg.RunDir,
+		sshKeyPath:   cfg.SSHKeyPath,
+		defaultCPU:   cpus,
+		defaultMem:   mem,
+		diskSizeGB:   diskGB,
+		images:       NewImageManager(cfg.ImageDir),
 	}
 }
 
@@ -178,14 +182,21 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 		netCfg.AddForward("tcp", hostPort, guestPort)
 	}
 
-	qmpSocket := filepath.Join(m.runDir, vmID+".qmp")
-	args := m.buildVMArgs(diskPath, gpuAddr, qmpSocket, netCfg, cpus, mem)
-
 	if err := os.MkdirAll(m.runDir, 0o755); err != nil {
 		_ = m.images.RemoveDisk(diskPath)
 		_ = vfio.Unbind()
 		return nil, domain.ErrQEMU{Op: "rundir", Err: err}
 	}
+
+	ovmfVarsPath, err := m.copyOVMFVars(vmID)
+	if err != nil {
+		_ = m.images.RemoveDisk(diskPath)
+		_ = vfio.Unbind()
+		return nil, domain.ErrQEMU{Op: "ovmf", Err: err}
+	}
+
+	qmpSocket := filepath.Join(m.runDir, vmID+".qmp")
+	args := m.buildVMArgs(diskPath, gpuAddr, qmpSocket, netCfg, cpus, mem, ovmfVarsPath)
 
 	logFile, _ := os.Create(filepath.Join(m.runDir, vmID+".log"))
 
@@ -214,6 +225,7 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 	m.diskPath = diskPath
 	m.qmpSocket = qmpSocket
 	m.gpuAddr = gpuAddr
+	m.ovmfVarsPath = ovmfVarsPath
 
 	m.done = make(chan struct{})
 	go func() {
@@ -392,22 +404,42 @@ func (m *Manager) prepareDisk(vmID string) (string, error) {
 	return m.images.CreateDisk(vmID, m.diskSizeGB)
 }
 
-func (m *Manager) buildVMArgs(diskPath, gpuAddr, qmpSocket string, net *NetworkConfig, cpus, mem string) []string {
+func (m *Manager) buildVMArgs(diskPath, gpuAddr, qmpSocket string, net *NetworkConfig, cpus, mem, ovmfVarsPath string) []string {
 	args := []string{
 		"-machine", "q35,accel=kvm",
 		"-cpu", "host",
 		"-smp", cpus,
 		"-m", strings.ToUpper(strings.TrimSpace(mem)),
+	}
+	if m.ovmfCode != "" && ovmfVarsPath != "" {
+		args = append(args,
+			"-drive", fmt.Sprintf("if=pflash,format=raw,readonly=on,file=%s", m.ovmfCode),
+			"-drive", fmt.Sprintf("if=pflash,format=raw,file=%s", ovmfVarsPath),
+		)
+	}
+	args = append(args,
 		"-drive", fmt.Sprintf("file=%s,format=qcow2,if=virtio", diskPath),
 		"-device", fmt.Sprintf("vfio-pci,host=%s", gpuAddr),
 		"-qmp", fmt.Sprintf("unix:%s,server,nowait", qmpSocket),
 		"-nographic",
-	}
-	if m.ovmfPath != "" {
-		args = append(args, "-bios", m.ovmfPath)
-	}
+	)
 	args = append(args, net.Args()...)
 	return args
+}
+
+func (m *Manager) copyOVMFVars(vmID string) (string, error) {
+	if m.ovmfVarsTmpl == "" {
+		return "", nil
+	}
+	dst := filepath.Join(m.runDir, vmID+"-OVMF_VARS.fd")
+	src, err := os.ReadFile(m.ovmfVarsTmpl)
+	if err != nil {
+		return "", fmt.Errorf("read OVMF_VARS template %s: %w", m.ovmfVarsTmpl, err)
+	}
+	if err := os.WriteFile(dst, src, 0o644); err != nil {
+		return "", fmt.Errorf("write OVMF_VARS %s: %w", dst, err)
+	}
+	return dst, nil
 }
 
 func (m *Manager) waitForQMP(qmp *QMPClient, timeout time.Duration) error {
@@ -475,6 +507,9 @@ func (m *Manager) cleanup() {
 	if m.qmpSocket != "" {
 		_ = os.Remove(m.qmpSocket)
 	}
+	if m.ovmfVarsPath != "" {
+		_ = os.Remove(m.ovmfVarsPath)
+	}
 
 	m.vmID = ""
 	m.cmd = nil
@@ -484,6 +519,7 @@ func (m *Manager) cleanup() {
 	m.diskPath = ""
 	m.qmpSocket = ""
 	m.gpuAddr = ""
+	m.ovmfVarsPath = ""
 	m.done = nil
 }
 

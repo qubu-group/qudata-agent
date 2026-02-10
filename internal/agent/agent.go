@@ -54,7 +54,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Agent, error) {
 
 	mgr := qemu.NewManager(qemu.Config{
 		QEMUBinary:    cfg.QEMUBinary,
-		OVMFPath:      cfg.OVMFPath,
+		OVMFCodePath:  cfg.OVMFCodePath,
+		OVMFVarsPath:  cfg.OVMFVarsPath,
 		BaseImagePath: cfg.BaseImagePath,
 		ImageDir:      cfg.ImageDir,
 		RunDir:        cfg.VMRunDir,

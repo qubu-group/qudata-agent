@@ -23,7 +23,8 @@ type Config struct {
 	FRPCConfigPath string
 
 	QEMUBinary        string
-	OVMFPath          string
+	OVMFCodePath      string
+	OVMFVarsPath      string
 	BaseImagePath     string
 	ImageDir          string
 	VMRunDir          string
@@ -36,6 +37,7 @@ type Config struct {
 }
 
 func DefaultConfig() *Config {
+	code, vars := findOVMF()
 	return &Config{
 		ServiceURL:      "https://internal.qudata.ai/v0",
 		DataDir:         "/var/lib/qudata",
@@ -43,13 +45,30 @@ func DefaultConfig() *Config {
 		FRPCBinary:      "/usr/local/bin/frpc",
 		FRPCConfigPath:  "/etc/qudata/frpc.toml",
 		QEMUBinary:      "/usr/bin/qemu-system-x86_64",
-		OVMFPath:        "/usr/share/OVMF/OVMF_CODE.fd",
+		OVMFCodePath:    code,
+		OVMFVarsPath:    vars,
 		ImageDir:        "/var/lib/qudata/images",
 		VMRunDir:        "/var/run/qudata",
 		VMDefaultCPUs:   "4",
 		VMDefaultMemory: "8G",
 		VMDiskSizeGB:    50,
 	}
+}
+
+func findOVMF() (code, vars string) {
+	pairs := [][2]string{
+		{"/usr/share/OVMF/OVMF_CODE_4M.fd", "/usr/share/OVMF/OVMF_VARS_4M.fd"},
+		{"/usr/share/OVMF/OVMF_CODE.fd", "/usr/share/OVMF/OVMF_VARS.fd"},
+		{"/usr/share/edk2/ovmf/OVMF_CODE.fd", "/usr/share/edk2/ovmf/OVMF_VARS.fd"},
+	}
+	for _, p := range pairs {
+		if _, e1 := os.Stat(p[0]); e1 == nil {
+			if _, e2 := os.Stat(p[1]); e2 == nil {
+				return p[0], p[1]
+			}
+		}
+	}
+	return "/usr/share/OVMF/OVMF_CODE_4M.fd", "/usr/share/OVMF/OVMF_VARS_4M.fd"
 }
 
 func Load() (*Config, error) {
@@ -81,8 +100,11 @@ func Load() (*Config, error) {
 	if v := os.Getenv("QUDATA_QEMU_BINARY"); v != "" {
 		cfg.QEMUBinary = v
 	}
-	if v := os.Getenv("QUDATA_OVMF_PATH"); v != "" {
-		cfg.OVMFPath = v
+	if v := os.Getenv("QUDATA_OVMF_CODE"); v != "" {
+		cfg.OVMFCodePath = v
+	}
+	if v := os.Getenv("QUDATA_OVMF_VARS"); v != "" {
+		cfg.OVMFVarsPath = v
 	}
 	if v := os.Getenv("QUDATA_BASE_IMAGE"); v != "" {
 		cfg.BaseImagePath = v

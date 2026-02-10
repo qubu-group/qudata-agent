@@ -80,16 +80,23 @@ def detect_gpus():
             addr = line.split()[0]
             if not addr.startswith("0000:"):
                 addr = f"0000:{addr}"
-            match = re.search(r"\[([0-9a-f]{4}):([0-9a-f]{4})\]", line.lower())
-            if match:
-                gpus.append(
-                    {
-                        "addr": addr,
-                        "vendor": match.group(1),
-                        "device": match.group(2),
-                        "name": line.split(":")[-1].strip().split("[")[0].strip(),
-                    }
-                )
+            id_match = re.search(r"\[([0-9a-f]{4}):([0-9a-f]{4})\]", line.lower())
+            if id_match:
+                # lspci format: "ADDR CLASS [CODE]: VENDOR DEVICE [VVVV:DDDD] (rev XX)"
+                # Name = everything after first ": " up to "[VVVV:DDDD]"
+                parts = line.split(": ", 1)
+                name = "Unknown GPU"
+                if len(parts) > 1:
+                    name = re.sub(
+                        r"\s*\[[0-9a-f]{4}:[0-9a-f]{4}\].*$", "",
+                        parts[1], flags=re.IGNORECASE,
+                    ).strip()
+                gpus.append({
+                    "addr": addr,
+                    "vendor": id_match.group(1),
+                    "device": id_match.group(2),
+                    "name": name,
+                })
     return gpus
 
 
@@ -260,6 +267,9 @@ def create_cloud_init_iso(ssh_pubkey):
 
           - apt-get clean
           - rm -rf /var/lib/apt/lists/*
+
+          - systemctl disable cloud-init cloud-init-local cloud-config cloud-final 2>/dev/null || true
+          - touch /etc/cloud/cloud-init.disabled
           - cloud-init clean --logs
 
           - touch /var/lib/cloud/instance/customization-complete
@@ -440,188 +450,256 @@ def inject_ssh_key():
             ]
         )
 
+    # Disable cloud-init to prevent datasource wait on every boot
+    ci_check = run(
+        ["virt-cat", "-a", str(BASE_IMAGE_PATH), "/etc/cloud/cloud-init.disabled"],
+        check=False,
+    )
+    if ci_check.returncode != 0:
+        print("  + Disabling cloud-init in base image")
+        run(
+            [
+                "virt-customize",
+                "-a",
+                str(BASE_IMAGE_PATH),
+                "--run-command",
+                "systemctl disable cloud-init cloud-init-local cloud-config cloud-final 2>/dev/null; "
+                "touch /etc/cloud/cloud-init.disabled",
+            ],
+            check=False,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Test GPU passthrough
 # ---------------------------------------------------------------------------
 
-def test_gpu_passthrough(gpu_addr):
-    """Boot a VM with GPU passthrough, verify nvidia-smi, then tear down.
+def _find_ovmf():
+    """Find OVMF firmware pair (code + vars). Returns (code, vars) or (None, None)."""
+    pairs = [
+        ("/usr/share/OVMF/OVMF_CODE_4M.fd", "/usr/share/OVMF/OVMF_VARS_4M.fd"),
+        ("/usr/share/OVMF/OVMF_CODE.fd", "/usr/share/OVMF/OVMF_VARS.fd"),
+        ("/usr/share/edk2/ovmf/OVMF_CODE.fd", "/usr/share/edk2/ovmf/OVMF_VARS.fd"),
+    ]
+    for code, vars_tmpl in pairs:
+        if Path(code).exists() and Path(vars_tmpl).exists():
+            return code, vars_tmpl
+    return None, None
 
-    Returns True on success, False on failure. Always restores GPU to host.
-    """
+
+def _show_log_tail(log_path, lines=30):
+    """Print last N lines of a log file."""
+    try:
+        content = log_path.read_text().strip()
+        if not content:
+            print("    (log empty)")
+            return
+        for line in content.split("\n")[-lines:]:
+            print(f"    {line}")
+    except Exception:
+        print("    (could not read log)")
+
+
+def _ssh_cmd(port, key_path, remote_cmd):
+    """Build SSH command list."""
+    return [
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "ConnectTimeout=5",
+        "-o", "BatchMode=yes",
+        "-o", "LogLevel=ERROR",
+        "-p", str(port),
+        "-i", str(key_path),
+        "root@127.0.0.1",
+        remote_cmd,
+    ]
+
+
+def test_gpu_passthrough(gpu_addr):
+    """Boot a test VM with GPU passthrough, verify nvidia-smi, tear down."""
     print("\n-> Testing GPU passthrough")
     print(f"  + GPU: {gpu_addr}")
 
-    ssh_key_path = SSH_DIR / "management_key"
+    ssh_key = SSH_DIR / "management_key"
     ssh_port = 2299
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     qemu_log = RUN_DIR / "gpu-test.log"
 
-    # Verify VFIO group device exists
-    iommu_group_link = Path(f"/sys/bus/pci/devices/{gpu_addr}/iommu_group")
-    if iommu_group_link.exists():
-        group_num = os.path.basename(os.readlink(str(iommu_group_link)))
-        vfio_dev = Path(f"/dev/vfio/{group_num}")
-        if not vfio_dev.exists():
-            print(f"  ! /dev/vfio/{group_num} not found — VFIO bind may have failed")
-            print("    Try: modprobe vfio-pci")
-            return False
-        print(f"  + VFIO group /dev/vfio/{group_num} ready")
+    # ---- Pre-flight checks ----
 
-    # Verify the device is actually bound to vfio-pci
+    if not ssh_key.exists():
+        print(f"  ! SSH key missing: {ssh_key}")
+        return False
+
+    # Check VFIO driver
     driver_link = Path(f"/sys/bus/pci/devices/{gpu_addr}/driver")
-    if driver_link.exists():
-        current_driver = os.path.basename(os.readlink(str(driver_link)))
-        if current_driver != "vfio-pci":
-            print(f"  ! GPU bound to '{current_driver}', not 'vfio-pci'")
+    if not driver_link.exists():
+        print(f"  ! No driver bound to {gpu_addr}")
+        return False
+    drv = os.path.basename(os.readlink(str(driver_link)))
+    if drv != "vfio-pci":
+        print(f"  ! Driver is '{drv}', expected 'vfio-pci'")
+        return False
+    print(f"  + Driver: vfio-pci")
+
+    # Check VFIO group device
+    iommu_link = Path(f"/sys/bus/pci/devices/{gpu_addr}/iommu_group")
+    if iommu_link.exists():
+        group = os.path.basename(os.readlink(str(iommu_link)))
+        vfio_dev = Path(f"/dev/vfio/{group}")
+        if not vfio_dev.exists():
+            print(f"  ! /dev/vfio/{group} missing")
             return False
-        print(f"  + GPU driver: vfio-pci")
+        print(f"  + VFIO: /dev/vfio/{group}")
+
+    # Find OVMF (required for GPU ROM initialization)
+    ovmf_code, ovmf_vars_tmpl = _find_ovmf()
+    if not ovmf_code:
+        print("  ! OVMF firmware not found")
+        print("    GPU passthrough requires UEFI: apt-get install ovmf")
+        return False
+    print(f"  + OVMF: {ovmf_code}")
+
+    # ---- Prepare artifacts ----
 
     overlay = IMAGE_DIR / "gpu-test.qcow2"
-    run(
-        [
-            "qemu-img", "create", "-f", "qcow2",
-            "-b", str(BASE_IMAGE_PATH), "-F", "qcow2",
-            str(overlay),
-        ]
-    )
-
-    qemu_cmd = [
-        "qemu-system-x86_64",
-        "-machine", "q35,accel=kvm",
-        "-cpu", "host",
-        "-smp", "2",
-        "-m", "4096",
-        "-drive", f"file={overlay},format=qcow2,if=virtio",
-        "-device", f"vfio-pci,host={gpu_addr}",
-        "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22",
-        "-device", "virtio-net-pci,netdev=net0",
-        "-nographic",
-    ]
-
-    # Add OVMF if available (required for GPU passthrough on Q35)
-    ovmf_found = False
-    for ovmf in [
-        "/usr/share/OVMF/OVMF_CODE.fd",
-        "/usr/share/ovmf/OVMF.fd",
-        "/usr/share/edk2/ovmf/OVMF_CODE.fd",
-        "/usr/share/qemu/OVMF.fd",
-    ]:
-        if Path(ovmf).exists():
-            qemu_cmd += ["-bios", ovmf]
-            ovmf_found = True
-            print(f"  + OVMF: {ovmf}")
-            break
-    if not ovmf_found:
-        print("  ! WARNING: OVMF not found — GPU passthrough may not work without UEFI")
-        print("    Install with: apt-get install ovmf")
-
-    proc = None
-    success = False
-    log_fh = None
+    ovmf_vars = RUN_DIR / "gpu-test-VARS.fd"
+    ci_iso = RUN_DIR / "gpu-test-cidata.iso"
+    cleanup_files = [overlay, ovmf_vars, ci_iso]
 
     try:
-        print("  + Starting test VM")
-        print(f"  + QEMU command: {' '.join(qemu_cmd)}")
-        print(f"  + Log: {qemu_log}")
-        log_fh = open(qemu_log, "w")
-        log_fh.write(f"CMD: {' '.join(qemu_cmd)}\n\n")
-        log_fh.flush()
-        proc = subprocess.Popen(
-            qemu_cmd,
-            stdout=log_fh,
-            stderr=log_fh,
-        )
+        # Overlay disk
+        run([
+            "qemu-img", "create", "-f", "qcow2",
+            "-b", str(BASE_IMAGE_PATH), "-F", "qcow2", str(overlay),
+        ])
 
-        print("  + Waiting for SSH (up to 120s)")
-        ssh_ready = False
-        deadline = time.time() + 120
-        while time.time() < deadline:
+        # OVMF vars copy (UEFI needs writable variable store)
+        shutil.copy2(ovmf_vars_tmpl, ovmf_vars)
+
+        # Cloud-init nocloud seed (skip datasource wait)
+        ci_dir = RUN_DIR / "ci-test"
+        ci_dir.mkdir(parents=True, exist_ok=True)
+        (ci_dir / "meta-data").write_text(
+            "instance-id: gpu-test\nlocal-hostname: gpu-test\n"
+        )
+        (ci_dir / "user-data").write_text("#cloud-config\n")
+        run([
+            "genisoimage", "-output", str(ci_iso),
+            "-volid", "cidata", "-joliet", "-rock",
+            str(ci_dir / "user-data"), str(ci_dir / "meta-data"),
+        ])
+        shutil.rmtree(ci_dir, ignore_errors=True)
+
+        # ---- QEMU command ----
+
+        qemu_cmd = [
+            "qemu-system-x86_64",
+            "-machine", "q35,accel=kvm",
+            "-cpu", "host",
+            "-smp", "2",
+            "-m", "4096",
+            "-drive", f"if=pflash,format=raw,readonly=on,file={ovmf_code}",
+            "-drive", f"if=pflash,format=raw,file={ovmf_vars}",
+            "-drive", f"file={overlay},format=qcow2,if=virtio",
+            "-drive", f"file={ci_iso},format=raw,if=virtio,readonly=on",
+            "-device", f"vfio-pci,host={gpu_addr}",
+            "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22",
+            "-device", "virtio-net-pci,netdev=net0",
+            "-nographic",
+            "-serial", "mon:stdio",
+        ]
+
+        # ---- Launch VM ----
+
+        print(f"  + Starting test VM")
+        print(f"  + Log: {qemu_log}")
+
+        with open(qemu_log, "w") as log_fh:
+            log_fh.write(f"CMD: {' '.join(qemu_cmd)}\n\n")
+            log_fh.flush()
+
+            proc = subprocess.Popen(qemu_cmd, stdout=log_fh, stderr=log_fh)
+
+            # Give QEMU a moment to start or fail
             time.sleep(3)
             if proc.poll() is not None:
-                print(f"  ! VM exited with code {proc.returncode}")
-                # Show last lines of QEMU log
+                print(f"  ! QEMU exited immediately (code {proc.returncode})")
                 log_fh.flush()
+                _show_log_tail(qemu_log)
+                return False
+
+            print(f"  + QEMU running (pid {proc.pid}), waiting for SSH (up to 180s)")
+
+            ssh_ready = False
+            deadline = time.time() + 180
+            while time.time() < deadline:
+                time.sleep(5)
+                if proc.poll() is not None:
+                    print(f"  ! VM exited (code {proc.returncode})")
+                    log_fh.flush()
+                    _show_log_tail(qemu_log)
+                    return False
+                r = run(_ssh_cmd(ssh_port, ssh_key, "true"), check=False)
+                if r.returncode == 0:
+                    ssh_ready = True
+                    break
+
+            if not ssh_ready:
+                print("  ! SSH not ready after 180s")
+                _show_log_tail(qemu_log)
+                proc.terminate()
                 try:
-                    lines = qemu_log.read_text().strip().split("\n")
-                    tail = lines[-20:] if len(lines) > 20 else lines
-                    if tail:
-                        print("  ! QEMU output:")
-                        for line in tail:
-                            print(f"    {line}")
-                except Exception:
-                    pass
-                break
+                    proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                return False
+
+            # ---- Test nvidia-smi ----
+
+            print("  + SSH ready, checking nvidia-smi")
             r = run(
-                [
-                    "ssh",
-                    "-o", "StrictHostKeyChecking=no",
-                    "-o", "UserKnownHostsFile=/dev/null",
-                    "-o", "ConnectTimeout=5",
-                    "-o", "BatchMode=yes",
-                    "-o", "LogLevel=ERROR",
-                    "-p", str(ssh_port),
-                    "-i", str(ssh_key_path),
-                    "root@127.0.0.1", "true",
-                ],
+                _ssh_cmd(ssh_port, ssh_key,
+                         "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader"),
                 check=False,
             )
-            if r.returncode == 0:
-                ssh_ready = True
-                break
 
-        if not ssh_ready:
-            print("  ! SSH not ready — test failed")
-            return False
-
-        print("  + SSH ready, checking nvidia-smi")
-        r = run(
-            [
-                "ssh",
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "BatchMode=yes",
-                "-o", "LogLevel=ERROR",
-                "-p", str(ssh_port),
-                "-i", str(ssh_key_path),
-                "root@127.0.0.1",
-                "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader",
-            ],
-            check=False,
-        )
-
-        if r.returncode == 0 and r.stdout.strip():
-            gpu_info = r.stdout.strip().split("\n")[0]
-            print(f"  + GPU detected in VM: {gpu_info}")
-            success = True
-        else:
-            print("  ! nvidia-smi failed inside VM")
-            if r.stdout:
-                print(f"    stdout: {r.stdout.strip()[:200]}")
-            if r.stderr:
-                print(f"    stderr: {r.stderr.strip()[:200]}")
             success = False
+            if r.returncode == 0 and r.stdout.strip():
+                print(f"  + GPU in VM: {r.stdout.strip().splitlines()[0]}")
+                success = True
+            else:
+                print("  ! nvidia-smi failed inside VM")
+                if r.stdout:
+                    print(f"    stdout: {r.stdout.strip()[:300]}")
+                if r.stderr:
+                    print(f"    stderr: {r.stderr.strip()[:300]}")
+
+            # ---- Shutdown ----
+
+            print("  + Shutting down test VM")
+            run(_ssh_cmd(ssh_port, ssh_key, "poweroff"), check=False)
+            try:
+                proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+
+        return success
 
     except Exception as e:
         print(f"  ! Test error: {e}")
-        success = False
+        return False
 
     finally:
-        if proc and proc.poll() is None:
-            print("  + Shutting down test VM")
-            proc.terminate()
-            try:
-                proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-
-        if log_fh:
-            log_fh.close()
-        overlay.unlink(missing_ok=True)
-
-    return success
+        for f in cleanup_files:
+            Path(f).unlink(missing_ok=True)
 
 
 def restore_gpu_to_host(gpu_addr):
@@ -646,8 +724,14 @@ def restore_gpu_to_host(gpu_addr):
 
 
 def bind_gpu_to_vfio(gpu_addr):
-    """Bind a GPU to vfio-pci for passthrough testing."""
+    """Bind a PCI device to vfio-pci driver."""
     device_dir = Path(f"/sys/bus/pci/devices/{gpu_addr}")
+
+    if not device_dir.exists():
+        print(f"  ! Device {gpu_addr} not found in sysfs")
+        return False
+
+    run(["modprobe", "vfio-pci"], check=False)
 
     driver_link = device_dir / "driver"
     if driver_link.exists():
@@ -660,19 +744,31 @@ def bind_gpu_to_vfio(gpu_addr):
         except OSError as e:
             print(f"  ! Cannot unbind {gpu_addr} from {current}: {e}")
             return False
+        time.sleep(0.5)
 
     override = device_dir / "driver_override"
     try:
         override.write_text("vfio-pci")
     except OSError as e:
-        print(f"  ! Cannot set driver_override: {e}")
+        print(f"  ! Cannot set driver_override for {gpu_addr}: {e}")
         return False
 
     probe = Path("/sys/bus/pci/drivers_probe")
     try:
         probe.write_text(gpu_addr)
     except OSError as e:
-        print(f"  ! Cannot probe driver: {e}")
+        print(f"  ! Cannot probe {gpu_addr}: {e}")
+        return False
+
+    time.sleep(0.5)
+
+    if driver_link.exists():
+        bound = os.path.basename(os.readlink(str(driver_link)))
+        if bound != "vfio-pci":
+            print(f"  ! {gpu_addr} bound to '{bound}', expected 'vfio-pci'")
+            return False
+    else:
+        print(f"  ! {gpu_addr} has no driver after probe")
         return False
 
     return True
@@ -727,15 +823,20 @@ def run_gpu_test(gpus):
         print("\n" + "=" * 50)
         print("  GPU PASSTHROUGH TEST PASSED")
         print("=" * 50)
-        print(f"\n  GPU {gpu['name']} is working correctly inside VM.")
+        print(f"\n  {gpu['name']} ({gpu_addr}) works inside VM.")
         print("  Proceeding with agent setup.\n")
     else:
         print("\n" + "=" * 50)
         print("  GPU PASSTHROUGH TEST FAILED")
         print("=" * 50)
-        print(f"\n  GPU {gpu['name']} ({gpu_addr}) did not respond inside VM.")
-        print("  Check IOMMU groups and VFIO configuration.")
-        print("  Logs: /var/run/qudata/\n")
+        print(f"\n  {gpu['name']} ({gpu_addr}) did not respond inside VM.")
+        print(f"  Log: {RUN_DIR / 'gpu-test.log'}")
+        print()
+        print("  Common causes:")
+        print("    - OVMF not installed: apt-get install ovmf")
+        print("    - vfio-pci module not loaded: modprobe vfio-pci")
+        print("    - All IOMMU group devices must be bound to vfio-pci")
+        print("    - Base image missing NVIDIA drivers\n")
         sys.exit(1)
 
 
