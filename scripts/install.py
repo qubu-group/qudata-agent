@@ -202,6 +202,10 @@ def download_base_image():
         #!/bin/bash
         set -e
         
+        # Configure DNS (required for virt-customize network access)
+        echo "nameserver 8.8.8.8" > /etc/resolv.conf
+        echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+        
         # Add non-free repos
         cat > /etc/apt/sources.list << 'EOF'
         deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
@@ -251,12 +255,11 @@ def download_base_image():
     script_path = IMAGE_DIR / "customize.sh"
     script_path.write_text(customize_script)
     
-    # Use virt-customize if available, otherwise use guestfish
-    if shutil.which("virt-customize"):
-        run(["virt-customize", "-a", str(tmp_image), "--run", str(script_path), "--selinux-relabel"])
-    else:
+    # Use virt-customize with network access for apt operations
+    if not shutil.which("virt-customize"):
         apt_install(["libguestfs-tools"])
-        run(["virt-customize", "-a", str(tmp_image), "--run", str(script_path), "--selinux-relabel"])
+    
+    run(["virt-customize", "-a", str(tmp_image), "--network", "--run", str(script_path), "--selinux-relabel"])
     
     script_path.unlink()
     tmp_image.rename(BASE_IMAGE_PATH)
@@ -450,7 +453,7 @@ def phase1(args):
         print("\n" + "=" * 50)
         print("  REBOOT REQUIRED")
         print("=" * 50)
-        print("\n  IOMMU has been configured. System will reboot in 10 seconds.")
+        print("\n  IOMMU has been configured.")
         print("  After reboot, installation will continue automatically.\n")
         
         # Create oneshot service to continue after reboot
@@ -473,9 +476,11 @@ def phase1(args):
         run(["systemctl", "daemon-reload"])
         run(["systemctl", "enable", "qudata-install-continue.service"])
         
-        import time
-        time.sleep(10)
-        run(["reboot"])
+        answer = input("  Reboot now? [y/N]: ").strip().lower()
+        if answer in ("y", "yes"):
+            run(["reboot"])
+        else:
+            print("\n  Reboot skipped. Run 'sudo reboot' manually to continue installation.\n")
     else:
         phase2_continue(args.api_key, gpus, args.service_url)
 
