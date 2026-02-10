@@ -1,0 +1,33 @@
+serverAddr = "agent.ru1.qudata.ai"
+serverPort = 7000
+
+[auth]
+method = "token"
+token = "YOUR_TOKEN"
+
+# HTTP на стандартных портах (80, 443)
+# Доступ: https://dev-test.ru1.qudata.ai
+[[proxies]]
+name = "web"
+type = "http"
+customDomains = ["dev-test"]
+localIP = "127.0.0.1"
+localPort = 8080
+
+# HTTP на кастомном порту (15001-65535)
+# Доступ: https://dev-test.ru1.qudata.ai:20000
+[[proxies]]
+name = "jupyter"
+type = "http"
+customDomains = ["dev-test:20000"]
+localIP = "127.0.0.1"
+localPort = 8888
+
+# TCP туннель (10000-15000)
+# Доступ: ssh -p 10001 user@dev-test.ru1.qudata.ai
+[[proxies]]
+name = "ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 22
+remotePort = 10001
