@@ -30,7 +30,6 @@ type Agent struct {
 	mgr      *qemu.Manager
 	frpcProc *frpc.Process
 	ports    *network.PortAllocator
-	stats    *system.StatsCollector
 
 	httpServer *server.Server
 	meta       *domain.AgentMetadata
@@ -126,7 +125,6 @@ func (a *Agent) Run(ctx context.Context) error {
 		a.logger.Info("host registered successfully")
 	}
 
-	a.stats = system.NewStatsCollector(a.mgr)
 	go a.publishStats(ctx)
 
 	a.httpServer = server.New(
@@ -239,19 +237,25 @@ func (a *Agent) publishStats(ctx context.Context) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	count := 0
+	errCount := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			report := a.stats.Collect(ctx)
+			status := a.mgr.Status(ctx)
+			if status == domain.StatusDestroyed {
+				continue
+			}
+			report := domain.StatsReport{Status: status}
 			if err := a.api.SendStats(ctx, report); err != nil {
-				if count%40 == 0 {
+				if errCount%40 == 0 {
 					a.logger.Warn("failed to send stats", "err", err)
 				}
+				errCount++
+			} else {
+				errCount = 0
 			}
-			count++
 		}
 	}
 }

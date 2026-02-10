@@ -81,7 +81,7 @@ func NewConfig(agentID, secretDomain string, agentPort int) *Config {
 			Type:         "http",
 			LocalIP:      "127.0.0.1",
 			LocalPort:    agentPort,
-			CustomDomain: fmt.Sprintf("%s%s:%d", secretDomain, DomainSuffix, agentPort),
+			CustomDomain: secretDomain + DomainSuffix,
 		},
 	}
 }
