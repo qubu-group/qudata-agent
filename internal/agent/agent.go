@@ -111,10 +111,16 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 		probe := system.NewProbe(gpuProvider)
 		hostReq := probe.HostRegistration(ctx)
-		a.logger.Info("registering host", "gpu", hostReq.GPUName, "gpu_count", hostReq.GPUAmount, "vram", hostReq.VRAM)
+		a.logger.Info("registering host",
+			"gpu", hostReq.GPUName,
+			"gpu_count", hostReq.GPUAmount,
+			"vram", hostReq.VRAM,
+			"max_cuda", hostReq.MaxCUDA,
+		)
 		if err := a.api.RegisterHost(ctx, hostReq); err != nil {
 			return fmt.Errorf("register host: %w", err)
 		}
+		a.logger.Info("host registered successfully")
 	}
 
 	a.stats = system.NewStatsCollector(a.mgr)
@@ -177,12 +183,24 @@ func (a *Agent) bootstrap(ctx context.Context) (*domain.AgentMetadata, error) {
 		Version:     config.Version,
 	}
 
-	a.logger.Info("initializing agent", "agent_id", agentID, "port", agentPort)
+	a.logger.Info("initializing agent",
+		"agent_id", agentID,
+		"port", agentPort,
+		"address", address,
+		"fingerprint", fingerprint,
+		"version", config.Version,
+	)
 
 	initResp, err := a.api.InitAgent(ctx, initReq)
 	if err != nil {
 		return nil, fmt.Errorf("init agent: %w", err)
 	}
+
+	a.logger.Info("init response",
+		"host_exists", initResp.HostExists,
+		"has_secret", initResp.SecretKey != "",
+		"has_frp", initResp.FRP != nil,
+	)
 
 	secretKey := initResp.SecretKey
 	if secretKey != "" {

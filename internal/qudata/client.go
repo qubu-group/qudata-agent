@@ -124,11 +124,20 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body []byte
 	secret := c.secret
 	c.mu.RUnlock()
 
+	authKind := "api-key"
 	if secret != "" {
 		req.Header.Set("X-Agent-Secret", secret)
+		authKind = "secret"
 	} else {
 		req.Header.Set("X-API-Key", c.apiKey)
 	}
+
+	c.logger.Info("API request",
+		"method", method,
+		"url", url,
+		"auth", authKind,
+		"body", truncate(string(body), 2048),
+	)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -141,6 +150,13 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body []byte
 		return nil, fmt.Errorf("read response body: %w", err)
 	}
 
+	c.logger.Info("API response",
+		"method", method,
+		"path", path,
+		"status", resp.StatusCode,
+		"body", truncate(string(respBody), 2048),
+	)
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		c.logger.Error("API error",
 			"method", method,
@@ -152,4 +168,11 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body []byte
 	}
 
 	return respBody, nil
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "...(truncated)"
 }
