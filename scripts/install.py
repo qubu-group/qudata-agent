@@ -5,10 +5,12 @@ import argparse
 import json
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
 import textwrap
+import time
 import urllib.request
 from pathlib import Path
 
@@ -180,94 +182,8 @@ def configure_iommu(gpus, audio_devices):
     return True
 
 
-def download_base_image():
-    """Download and customize Debian cloud image"""
-    print("\n-> Preparing base image")
-    
-    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-    
-    if BASE_IMAGE_PATH.exists():
-        print("  + Base image already exists")
-        return
-    
-    print(f"  + Downloading Debian cloud image...")
-    tmp_image = IMAGE_DIR / "debian-cloud.qcow2"
-    urllib.request.urlretrieve(DEBIAN_CLOUD_IMAGE, tmp_image)
-    
-    print("  + Resizing to 20GB...")
-    run(["qemu-img", "resize", str(tmp_image), "20G"])
-    
-    print("  + Customizing image...")
-    customize_script = textwrap.dedent("""\
-        #!/bin/bash
-        set -e
-        
-        # Configure DNS (required for virt-customize network access)
-        echo "nameserver 8.8.8.8" > /etc/resolv.conf
-        echo "nameserver 1.1.1.1" >> /etc/resolv.conf
-        
-        # Add non-free repos
-        cat > /etc/apt/sources.list << 'EOF'
-        deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
-        deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
-        deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
-        EOF
-        
-        apt-get update
-        apt-get install -y openssh-server curl wget gnupg ca-certificates
-        
-        # Install NVIDIA driver
-        apt-get install -y nvidia-driver
-        
-        # Install Docker
-        install -m 0755 -d /etc/apt/keyrings
-        curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-        chmod a+r /etc/apt/keyrings/docker.asc
-        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list
-        apt-get update
-        apt-get install -y docker-ce docker-ce-cli containerd.io
-        
-        # Install NVIDIA Container Toolkit
-        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-        curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' > /etc/apt/sources.list.d/nvidia-container-toolkit.list
-        apt-get update
-        apt-get install -y nvidia-container-toolkit
-        nvidia-ctk runtime configure --runtime=docker
-        
-        # Configure SSH
-        mkdir -p /root/.ssh
-        chmod 700 /root/.ssh
-        sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
-        sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-        systemctl enable ssh docker
-        
-        # Configure network
-        cat > /etc/network/interfaces.d/eth0 << 'EOF'
-        auto eth0
-        iface eth0 inet dhcp
-        EOF
-        
-        # Cleanup
-        apt-get clean
-        rm -rf /var/lib/apt/lists/*
-    """)
-    
-    script_path = IMAGE_DIR / "customize.sh"
-    script_path.write_text(customize_script)
-    
-    # Use virt-customize with network access for apt operations
-    if not shutil.which("virt-customize"):
-        apt_install(["libguestfs-tools"])
-    
-    run(["virt-customize", "-a", str(tmp_image), "--network", "--run", str(script_path), "--selinux-relabel"])
-    
-    script_path.unlink()
-    tmp_image.rename(BASE_IMAGE_PATH)
-    print("  + Base image ready")
-
-
-def inject_ssh_key():
-    """Inject management SSH key into base image"""
+def generate_ssh_key():
+    """Generate management SSH key if not exists"""
     SSH_DIR.mkdir(parents=True, exist_ok=True)
     
     priv_key = SSH_DIR / "management_key"
@@ -277,14 +193,240 @@ def inject_ssh_key():
         print("  + Generating SSH key...")
         run(["ssh-keygen", "-t", "ed25519", "-f", str(priv_key), "-N", "", "-C", "qudata-management"])
     
+    return pub_key.read_text().strip()
+
+
+def create_cloud_init_iso(ssh_pubkey):
+    """Create cloud-init NoCloud ISO for VM customization"""
+    ci_dir = IMAGE_DIR / "cloud-init"
+    ci_dir.mkdir(parents=True, exist_ok=True)
+    
+    # meta-data
+    meta_data = "instance-id: qudata-customize\nlocal-hostname: qudata-base\n"
+    (ci_dir / "meta-data").write_text(meta_data)
+    
+    # user-data with full customization script
+    user_data = textwrap.dedent(f"""\
+        #cloud-config
+        
+        ssh_authorized_keys:
+          - {ssh_pubkey}
+        
+        write_files:
+          - path: /etc/apt/sources.list
+            content: |
+              deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
+              deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
+              deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
+          
+          - path: /etc/network/interfaces.d/eth0
+            content: |
+              auto eth0
+              iface eth0 inet dhcp
+
+        runcmd:
+          # Wait for network
+          - |
+            for i in $(seq 1 30); do
+              ping -c1 8.8.8.8 >/dev/null 2>&1 && break
+              sleep 2
+            done
+          
+          # Update and install base packages
+          - apt-get update
+          - apt-get install -y openssh-server curl wget gnupg ca-certificates
+          
+          # Install NVIDIA driver
+          - apt-get install -y nvidia-driver || true
+          
+          # Install Docker
+          - install -m 0755 -d /etc/apt/keyrings
+          - curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+          - chmod a+r /etc/apt/keyrings/docker.asc
+          - echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list
+          - apt-get update
+          - apt-get install -y docker-ce docker-ce-cli containerd.io
+          
+          # Install NVIDIA Container Toolkit
+          - curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+          - 'curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed "s#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g" > /etc/apt/sources.list.d/nvidia-container-toolkit.list'
+          - apt-get update
+          - apt-get install -y nvidia-container-toolkit
+          - nvidia-ctk runtime configure --runtime=docker || true
+          
+          # Configure SSH
+          - mkdir -p /root/.ssh
+          - chmod 700 /root/.ssh
+          - sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+          - sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+          - systemctl enable ssh docker
+          
+          # Cleanup
+          - apt-get clean
+          - rm -rf /var/lib/apt/lists/*
+          - cloud-init clean --logs
+          
+          # Signal completion and shutdown
+          - touch /var/lib/cloud/instance/customization-complete
+          - poweroff
+    """)
+    (ci_dir / "user-data").write_text(user_data)
+    
+    # Create ISO
+    iso_path = IMAGE_DIR / "cloud-init.iso"
+    run(["genisoimage", "-output", str(iso_path), "-volid", "cidata", "-joliet", "-rock",
+         str(ci_dir / "user-data"), str(ci_dir / "meta-data")])
+    
+    # Cleanup
+    shutil.rmtree(ci_dir)
+    
+    return iso_path
+
+
+def download_base_image():
+    """Download and customize Debian cloud image using real VM with cloud-init"""
+    print("\n-> Preparing base image")
+    
+    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    
+    if BASE_IMAGE_PATH.exists():
+        print("  + Base image already exists")
+        return
+    
+    # Generate SSH key first
+    ssh_pubkey = generate_ssh_key()
+    
+    # Download cloud image
+    print("  + Downloading Debian cloud image...")
+    tmp_image = IMAGE_DIR / "debian-cloud.qcow2"
+    urllib.request.urlretrieve(DEBIAN_CLOUD_IMAGE, tmp_image)
+    
+    print("  + Resizing to 20GB...")
+    run(["qemu-img", "resize", str(tmp_image), "20G"])
+    
+    # Install genisoimage for cloud-init ISO
+    if not shutil.which("genisoimage"):
+        apt_install(["genisoimage"])
+    
+    print("  + Creating cloud-init configuration...")
+    ci_iso = create_cloud_init_iso(ssh_pubkey)
+    
+    print("  + Starting VM for customization (this may take 10-15 minutes)...")
+    print("    The VM will install packages and shutdown automatically.")
+    
+    # Run QEMU with cloud-init to customize the image
+    # Using user-mode networking (SLIRP) which provides NAT and DNS
+    qemu_cmd = [
+        "qemu-system-x86_64",
+        "-machine", "q35,accel=kvm",
+        "-cpu", "host",
+        "-m", "4096",
+        "-smp", "4",
+        "-drive", f"file={tmp_image},format=qcow2,if=virtio",
+        "-drive", f"file={ci_iso},format=raw,if=virtio,readonly=on",
+        "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22",
+        "-device", "virtio-net-pci,netdev=net0",
+        "-nographic",
+        "-serial", "mon:stdio",
+    ]
+    
+    # Run with timeout (20 minutes should be enough)
+    print("    VM output will be shown below:")
+    print("    " + "-" * 50)
+    
+    proc = subprocess.Popen(
+        qemu_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1
+    )
+    
+    start_time = time.time()
+    timeout = 20 * 60  # 20 minutes
+    
+    try:
+        while proc.poll() is None:
+            # Check timeout
+            if time.time() - start_time > timeout:
+                proc.terminate()
+                proc.wait(timeout=10)
+                raise TimeoutError("VM customization timed out after 20 minutes")
+            
+            # Read output with timeout
+            import select
+            if select.select([proc.stdout], [], [], 1.0)[0]:
+                line = proc.stdout.readline()
+                if line:
+                    print(f"    {line.rstrip()}")
+        
+        # Get remaining output
+        for line in proc.stdout:
+            print(f"    {line.rstrip()}")
+        
+        print("    " + "-" * 50)
+        
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, qemu_cmd)
+            
+    except KeyboardInterrupt:
+        proc.terminate()
+        proc.wait(timeout=10)
+        raise
+    finally:
+        # Cleanup cloud-init ISO
+        ci_iso.unlink(missing_ok=True)
+    
+    # Verify customization completed
+    print("  + Verifying customization...")
+    
+    # Use libguestfs to check completion marker (no network needed)
+    if not shutil.which("virt-cat"):
+        apt_install(["libguestfs-tools"])
+    
+    check = run(["virt-cat", "-a", str(tmp_image), "/var/lib/cloud/instance/customization-complete"], check=False)
+    if check.returncode != 0:
+        # Try alternative check - see if docker is installed
+        check2 = run(["virt-ls", "-a", str(tmp_image), "/usr/bin/"], check=False)
+        if "docker" not in check2.stdout:
+            print("  ! Warning: Customization may not have completed successfully")
+            print("  ! Check the VM output above for errors")
+    
+    # Clean up cloud-init state so it doesn't run again
+    print("  + Cleaning up cloud-init state...")
+    run(["virt-customize", "-a", str(tmp_image),
+         "--delete", "/var/lib/cloud/instance/customization-complete",
+         "--run-command", "rm -rf /var/lib/cloud/instances/*",
+         "--run-command", "rm -f /etc/machine-id",
+         "--run-command", "truncate -s 0 /etc/machine-id"],
+        check=False)
+    
+    tmp_image.rename(BASE_IMAGE_PATH)
+    print("  + Base image ready")
+
+
+def inject_ssh_key():
+    """Inject management SSH key into base image (if not already done)"""
+    # SSH key is now injected via cloud-init during image creation
+    # This function is kept for compatibility and re-injection if needed
+    
+    priv_key = SSH_DIR / "management_key"
+    pub_key = SSH_DIR / "management_key.pub"
+    
+    if not priv_key.exists():
+        generate_ssh_key()
+    
+    # Verify key is in image
     pub_key_content = pub_key.read_text().strip()
     
-    print("  + Injecting SSH key into image...")
-    run(["virt-customize", "-a", str(BASE_IMAGE_PATH),
-         "--mkdir", "/root/.ssh",
-         "--chmod", "0700:/root/.ssh",
-         "--write", f"/root/.ssh/authorized_keys:{pub_key_content}",
-         "--chmod", "0600:/root/.ssh/authorized_keys"])
+    check = run(["virt-cat", "-a", str(BASE_IMAGE_PATH), "/root/.ssh/authorized_keys"], check=False)
+    if pub_key_content not in check.stdout:
+        print("  + Re-injecting SSH key into image...")
+        run(["virt-customize", "-a", str(BASE_IMAGE_PATH),
+             "--mkdir", "/root/.ssh",
+             "--chmod", "0700:/root/.ssh",
+             "--write", f"/root/.ssh/authorized_keys:{pub_key_content}",
+             "--chmod", "0600:/root/.ssh/authorized_keys"])
 
 
 def install_base():
@@ -393,7 +535,6 @@ def start_service():
     print("\n-> Starting agent")
     run(["systemctl", "restart", AGENT_NAME])
     
-    import time
     time.sleep(3)
     
     if run(["systemctl", "is-active", "--quiet", AGENT_NAME], check=False).returncode != 0:
