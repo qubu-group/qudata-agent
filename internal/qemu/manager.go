@@ -202,6 +202,9 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 
 	m.logger.Info("starting VM", "vm_id", vmID, "gpu", gpuAddr, "cpus", cpus, "mem", mem)
 
+	// Log root password if exists
+	m.logRootPassword()
+
 	cmd := exec.Command(m.qemuBin, args...)
 	if logFile != nil {
 		cmd.Stdout = logFile
@@ -556,5 +559,19 @@ func mapQMPStatus(s string) domain.InstanceStatus {
 		return domain.StatusDestroyed
 	default:
 		return domain.StatusError
+	}
+}
+
+func (m *Manager) logRootPassword() {
+	// Try to read root password from /var/lib/qudata/root_password.txt
+	passwordFile := "/var/lib/qudata/root_password.txt"
+	data, err := os.ReadFile(passwordFile)
+	if err != nil {
+		m.logger.Debug("root password file not found", "path", passwordFile)
+		return
+	}
+	password := strings.TrimSpace(string(data))
+	if password != "" {
+		m.logger.Info("VM root credentials", "username", "root", "password", password)
 	}
 }

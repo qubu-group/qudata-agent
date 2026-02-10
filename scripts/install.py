@@ -4,9 +4,12 @@
 import argparse
 import json
 import os
+import random
 import re
+import secrets
 import select
 import shutil
+import string
 import subprocess
 import sys
 import textwrap
@@ -37,6 +40,11 @@ UBUNTU_CLOUD_IMAGE = (
     "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
 )
 BASE_IMAGE_PATH = IMAGE_DIR / "qudata-base.qcow2"
+ROOT_PASSWORD_FILE = DATA_DIR / "root_password.txt"
+
+
+# libguestfs: use direct backend (no libvirt dependency).
+os.environ["LIBGUESTFS_BACKEND"] = "direct"
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +72,27 @@ def load_state():
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text())
     return {}
+
+
+def generate_root_password():
+    """Generate a secure random password for root user."""
+    # Generate 16-character password with letters, digits, and some special chars
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+    password = ''.join(secrets.choice(alphabet) for _ in range(16))
+    
+    # Save to file
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ROOT_PASSWORD_FILE.write_text(password)
+    ROOT_PASSWORD_FILE.chmod(0o600)
+    
+    return password
+
+
+def get_or_generate_root_password():
+    """Get existing root password or generate a new one."""
+    if ROOT_PASSWORD_FILE.exists():
+        return ROOT_PASSWORD_FILE.read_text().strip()
+    return generate_root_password()
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +458,16 @@ def download_base_image():
     print("  + Base image ready")
 
 
+def stop_running_agent():
+    """Stop agent and kill any QEMU processes to release the base image."""
+    run(["systemctl", "stop", AGENT_NAME], check=False)
+    # Kill leftover QEMU instances that may lock the base image.
+    r = run(["pgrep", "-f", "qemu-system"], check=False)
+    if r.returncode == 0:
+        run(["pkill", "-9", "-f", "qemu-system"], check=False)
+        time.sleep(1)
+
+
 def prepare_base_image():
     """Inject SSH key, fix networking, SSH config, disable cloud-init."""
     priv_key = SSH_DIR / "management_key"
@@ -438,8 +477,20 @@ def prepare_base_image():
         generate_ssh_key()
 
     pub_key_content = pub_key.read_text().strip()
-
+    
+    # Generate or get root password
+    root_password = get_or_generate_root_password()
+    
     print("  + Configuring base image")
+    print(f"  + Root password: {root_password}")
+    print(f"  + Password saved to: {ROOT_PASSWORD_FILE}")
+    
+    # Generate password hash for chpasswd
+    # Using openssl to generate SHA-512 hash
+    hash_cmd = ["openssl", "passwd", "-6", root_password]
+    hash_result = run(hash_cmd, check=True)
+    password_hash = hash_result.stdout.strip()
+
     run([
         "virt-customize", "-a", str(BASE_IMAGE_PATH),
 
@@ -448,6 +499,10 @@ def prepare_base_image():
         "--chmod", "0700:/root/.ssh",
         "--write", f"/root/.ssh/authorized_keys:{pub_key_content}",
         "--chmod", "0600:/root/.ssh/authorized_keys",
+
+        # ---- Set root password ----
+        "--run-command",
+        f"echo 'root:{password_hash}' | chpasswd -e",
 
         # ---- Network: nuke old configs, force systemd-networkd ----
         "--run-command",
@@ -471,10 +526,11 @@ def prepare_base_image():
         "> /etc/systemd/system/systemd-networkd-wait-online.service.d/any.conf; "
         "true",
 
-        # ---- SSH server config ----
+        # ---- SSH server config: allow both key and password auth ----
         "--run-command",
-        "sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config; "
+        "sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config; "
         "sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config; "
+        "sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config; "
         "systemctl enable ssh 2>/dev/null; systemctl enable sshd 2>/dev/null; true",
 
         # ---- Disable cloud-init ----
@@ -939,8 +995,11 @@ def install_base():
 def install_qemu():
     print("\n-> Installing QEMU")
     apt_install(
-        ["qemu-system-x86", "ovmf", "libguestfs-tools", "qemu-utils"]
+        ["qemu-system-x86", "ovmf", "libguestfs-tools", "qemu-utils",
+         "linux-image-amd64", "guestfs-tools"]
     )
+    # Rebuild libguestfs appliance (required on Debian/Ubuntu).
+    run(["update-guestfs-appliance"], check=False)
     print("  + Installed")
 
 
@@ -1104,6 +1163,7 @@ def phase1(args):
 
     if args.debug:
         create_service(args.api_key, [], True, args.service_url, args.test)
+        stop_running_agent()
         download_base_image()
         prepare_base_image()
         start_service()
@@ -1180,6 +1240,7 @@ def phase2_continue(api_key, gpus, service_url, test_mode=False):
 
     print("\n-> IOMMU is active")
 
+    stop_running_agent()
     download_base_image()
     prepare_base_image()
 
@@ -1197,6 +1258,13 @@ def print_success():
     print("\n" + "=" * 50)
     print("  Installation complete!")
     print("=" * 50)
+    
+    # Display root password if exists
+    if ROOT_PASSWORD_FILE.exists():
+        root_password = ROOT_PASSWORD_FILE.read_text().strip()
+        print(f"\n  Root password: {root_password}")
+        print(f"  Password file: {ROOT_PASSWORD_FILE}")
+    
     print(f"\n  Status:  systemctl status {AGENT_NAME}")
     print(f"  Logs:    journalctl -u {AGENT_NAME} -f\n")
 
