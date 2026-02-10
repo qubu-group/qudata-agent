@@ -22,6 +22,7 @@ type Server struct {
 func New(
 	port int,
 	secret string,
+	testMode bool,
 	vm domain.VMManager,
 	frpcProc *frpc.Process,
 	ports *network.PortAllocator,
@@ -45,9 +46,15 @@ func New(
 	router.POST("/ssh", h.AddSSH)
 	router.DELETE("/ssh", h.RemoveSSH)
 
+	// TODO: --test mode — listen on 0.0.0.0 for direct IP access without FRPC.
+	bindAddr := "127.0.0.1"
+	if testMode {
+		bindAddr = "0.0.0.0"
+	}
+
 	return &Server{
 		httpServer: &http.Server{
-			Addr:         fmt.Sprintf("127.0.0.1:%d", port),
+			Addr:         fmt.Sprintf("%s:%d", bindAddr, port),
 			Handler:      router,
 			ReadTimeout:  30 * time.Second,
 			WriteTimeout: 60 * time.Second,

@@ -1006,7 +1006,7 @@ def build_agent(binary_path=None):
 # Systemd service
 # ---------------------------------------------------------------------------
 
-def create_service(api_key, gpus, debug, service_url):
+def create_service(api_key, gpus, debug, service_url, test_mode=False):
     print("\n-> Creating systemd service")
 
     for d in [DATA_DIR, IMAGE_DIR, SSH_DIR, LOG_DIR, FRPC_DIR, RUN_DIR]:
@@ -1025,6 +1025,10 @@ def create_service(api_key, gpus, debug, service_url):
     if debug:
         env.append('Environment="QUDATA_DEBUG=true"')
 
+    exec_start = str(BINARY_PATH)
+    if test_mode:
+        exec_start += " --test"
+
     unit = textwrap.dedent(
         f"""\
         [Unit]
@@ -1033,7 +1037,7 @@ def create_service(api_key, gpus, debug, service_url):
 
         [Service]
         Type=simple
-        ExecStart={BINARY_PATH}
+        ExecStart={exec_start}
         Restart=always
         RestartSec=10
         {chr(10).join(env)}
@@ -1099,7 +1103,7 @@ def phase1(args):
     build_agent(args.binary)
 
     if args.debug:
-        create_service(args.api_key, [], True, args.service_url)
+        create_service(args.api_key, [], True, args.service_url, args.test)
         download_base_image()
         prepare_base_image()
         start_service()
@@ -1118,6 +1122,7 @@ def phase1(args):
                 "gpus": gpus,
                 "service_url": args.service_url,
                 "binary": args.binary,
+                "test_mode": args.test,
             }
         )
 
@@ -1155,10 +1160,10 @@ def phase1(args):
         else:
             print("  Run 'sudo reboot' when ready.\n")
     else:
-        phase2_continue(args.api_key, gpus, args.service_url)
+        phase2_continue(args.api_key, gpus, args.service_url, args.test)
 
 
-def phase2_continue(api_key, gpus, service_url):
+def phase2_continue(api_key, gpus, service_url, test_mode=False):
     print("\n" + "=" * 50)
     print("  QuData Agent Installer — Phase 2")
     print("=" * 50)
@@ -1181,7 +1186,7 @@ def phase2_continue(api_key, gpus, service_url):
     if gpus:
         run_gpu_test(gpus)
 
-    create_service(api_key, gpus, False, service_url)
+    create_service(api_key, gpus, False, service_url, test_mode)
     start_service()
 
     STATE_FILE.unlink(missing_ok=True)
@@ -1205,6 +1210,7 @@ def main():
     p.add_argument("api_key", nargs="?", help="API key (ak-...)")
     p.add_argument("--binary", metavar="PATH", help="Pre-built binary")
     p.add_argument("--debug", action="store_true", help="Debug mode (no GPU)")
+    p.add_argument("--test", action="store_true", help="Test mode (no FRPC, public ports)")
     p.add_argument("--service-url", metavar="URL", help="API URL override")
     p.add_argument(
         "--continue", dest="cont", action="store_true", help="Continue after reboot"
@@ -1218,7 +1224,7 @@ def main():
         state = load_state()
         if not state:
             sys.exit("No saved state found")
-        phase2_continue(state["api_key"], state["gpus"], state.get("service_url"))
+        phase2_continue(state["api_key"], state["gpus"], state.get("service_url"), state.get("test_mode", False))
         return
 
     if not args.api_key:

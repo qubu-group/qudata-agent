@@ -89,17 +89,21 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	a.meta = meta
 
-	if meta.TunnelToken == "" {
-		return fmt.Errorf("tunnel_token not received from API — cannot start FRPC tunnel")
+	// TODO: --test mode — skip FRPC, agent accessible directly by IP.
+	if a.cfg.TestMode {
+		a.logger.Info("test mode — FRPC disabled, listening on 0.0.0.0")
+	} else {
+		if meta.TunnelToken == "" {
+			return fmt.Errorf("tunnel_token not received from API — cannot start FRPC tunnel")
+		}
+		if err := a.frpcProc.Start(meta.ID, meta.TunnelToken, meta.Port); err != nil {
+			return fmt.Errorf("start frpc: %w", err)
+		}
+		a.logger.Info("frpc tunnel established",
+			"tunnel_token", meta.TunnelToken,
+			"domain", meta.TunnelToken+frpc.DomainSuffix,
+		)
 	}
-
-	if err := a.frpcProc.Start(meta.ID, meta.TunnelToken, meta.Port); err != nil {
-		return fmt.Errorf("start frpc: %w", err)
-	}
-	a.logger.Info("frpc tunnel established",
-		"tunnel_token", meta.TunnelToken,
-		"domain", meta.TunnelToken+frpc.DomainSuffix,
-	)
 
 	_ = a.store.ClearInstanceState()
 
@@ -130,6 +134,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.httpServer = server.New(
 		meta.Port,
 		meta.SecretKey,
+		a.cfg.TestMode,
 		a.mgr,
 		a.frpcProc,
 		a.ports,

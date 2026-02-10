@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/qudata/agent/internal/domain"
@@ -12,6 +11,9 @@ import (
 	"github.com/qudata/agent/internal/network"
 	"github.com/qudata/agent/internal/storage"
 )
+
+// TODO: hardcoded ports — replace with dynamic config from API when ready.
+const ollamaGuestPort = 11434
 
 type Handler struct {
 	vm     domain.VMManager
@@ -42,18 +44,10 @@ func (h *Handler) Ping(c *gin.Context) {
 }
 
 type createInstanceRequest struct {
-	Ports       []portRequest `json:"ports" binding:"required"`
-	SSHEnabled  bool          `json:"ssh_enabled"`
-	TunnelToken string        `json:"tunnel_token" binding:"required"`
-	DiskSizeGB  int           `json:"disk_size_gb"`
-	CPUs        string        `json:"cpus"`
-	Memory      string        `json:"memory"`
-}
-
-type portRequest struct {
-	GuestPort  int    `json:"guest_port" binding:"required"`
-	RemotePort int    `json:"remote_port" binding:"required"`
-	Proto      string `json:"proto" binding:"required"`
+	TunnelToken string `json:"tunnel_token" binding:"required"`
+	DiskSizeGB  int    `json:"disk_size_gb"`
+	CPUs        string `json:"cpus"`
+	Memory      string `json:"memory"`
 }
 
 func (h *Handler) CreateInstance(c *gin.Context) {
@@ -63,69 +57,63 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 		return
 	}
 
+	// SSH: guest 22 → TCP remotePort from 10000-15000
+	sshRemotePort, err := h.ports.AllocateSSHPort()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "ssh port: " + err.Error()})
+		return
+	}
+
+	sshHostPort, err := h.ports.AllocateAppPorts(1)
+	if err != nil {
+		h.ports.Release(sshRemotePort)
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "ssh local port: " + err.Error()})
+		return
+	}
+
+	// Ollama: guest 11434 → HTTP on app port
+	ollamaHostPort, err := h.ports.AllocateAppPorts(1)
+	if err != nil {
+		h.ports.Release(sshRemotePort)
+		h.ports.Release(sshHostPort...)
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "ollama port: " + err.Error()})
+		return
+	}
+
+	// Ollama remote port for customDomains = ["token:<port>"]
+	ollamaRemotePort, err := h.ports.AllocateAppPorts(1)
+	if err != nil {
+		h.ports.Release(sshRemotePort)
+		h.ports.Release(sshHostPort...)
+		h.ports.Release(ollamaHostPort...)
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "ollama remote port: " + err.Error()})
+		return
+	}
+
 	spec := domain.InstanceSpec{
-		SSHEnabled:  req.SSHEnabled,
+		SSHEnabled:  true,
 		TunnelToken: req.TunnelToken,
 		DiskSizeGB:  req.DiskSizeGB,
 		CPUs:        req.CPUs,
 		Memory:      req.Memory,
-	}
-	for _, p := range req.Ports {
-		spec.Ports = append(spec.Ports, domain.PortMapping{
-			GuestPort:  p.GuestPort,
-			RemotePort: p.RemotePort,
-			Proto:      p.Proto,
-		})
+		Ports: []domain.PortMapping{
+			{Name: "ollama", GuestPort: ollamaGuestPort, RemotePort: ollamaRemotePort[0], Proto: "http"},
+		},
 	}
 
-	portsNeeded := len(spec.Ports)
-	if spec.SSHEnabled {
-		portsNeeded++
-	}
-
-	var hostPorts []int
-	var sshRemotePort int
-
-	if spec.SSHEnabled {
-		sshPort, err := h.ports.AllocateSSHPort()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "ssh port allocation: " + err.Error()})
-			return
-		}
-		sshRemotePort = sshPort
-
-		localSSHPort, err := h.ports.AllocateAppPorts(1)
-		if err != nil {
-			h.ports.Release(sshPort)
-			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "local ssh port allocation: " + err.Error()})
-			return
-		}
-		hostPorts = append(hostPorts, localSSHPort[0])
-	}
-
-	if len(spec.Ports) > 0 {
-		appPorts, err := h.ports.AllocateAppPorts(len(spec.Ports))
-		if err != nil {
-			h.ports.Release(hostPorts...)
-			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "app port allocation: " + err.Error()})
-			return
-		}
-		hostPorts = append(hostPorts, appPorts...)
-	}
+	// hostPorts order: [sshHost, ollamaHost] — matches BuildInstanceProxies expectations.
+	hostPorts := []int{sshHostPort[0], ollamaHostPort[0]}
 
 	go h.startInstance(context.Background(), spec, hostPorts, sshRemotePort)
 
-	portResult := make(map[string]int)
-	if spec.SSHEnabled {
-		portResult["ssh"] = sshRemotePort
-	}
-	for _, pm := range spec.Ports {
-		portResult[strconv.Itoa(pm.GuestPort)] = pm.RemotePort
-	}
-
 	c.JSON(http.StatusOK, gin.H{
-		"ok":   true,
-		"data": gin.H{"ports": portResult},
+		"ok": true,
+		"data": gin.H{
+			"ports": gin.H{
+				"ssh":    sshRemotePort,
+				"ollama": ollamaRemotePort[0],
+			},
+		},
 	})
 }
 
@@ -136,7 +124,6 @@ func (h *Handler) startInstance(ctx context.Context, spec domain.InstanceSpec, h
 		return
 	}
 
-	// Build port specs for FRPC proxy generation.
 	var portSpecs []frpc.PortSpec
 	for _, pm := range spec.Ports {
 		portSpecs = append(portSpecs, frpc.PortSpec{

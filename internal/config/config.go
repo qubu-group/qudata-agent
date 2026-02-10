@@ -16,6 +16,7 @@ type Config struct {
 	APIKey     string
 	ServiceURL string
 	Debug      bool
+	TestMode   bool // --test: listen on 0.0.0.0, no FRPC, no tunnel_token required
 	DataDir    string
 	LogDir     string
 

@@ -18,6 +18,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// TODO: --test mode — agent and VM ports listen on 0.0.0.0, no FRPC proxy.
+	for _, arg := range os.Args[1:] {
+		if arg == "--test" {
+			cfg.TestMode = true
+		}
+	}
+
 	logger, err := config.NewLogger(cfg, "agent")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "logger error: %v\n", err)
@@ -28,6 +35,7 @@ func main() {
 		"version", config.Version,
 		"build_time", config.BuildTime,
 		"debug", cfg.Debug,
+		"test_mode", cfg.TestMode,
 	)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
