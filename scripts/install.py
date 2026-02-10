@@ -429,7 +429,8 @@ def download_base_image():
     print("  + Base image ready")
 
 
-def inject_ssh_key():
+def prepare_base_image():
+    """Inject SSH key, fix networking, SSH config, disable cloud-init."""
     priv_key = SSH_DIR / "management_key"
     pub_key = SSH_DIR / "management_key.pub"
 
@@ -438,71 +439,67 @@ def inject_ssh_key():
 
     pub_key_content = pub_key.read_text().strip()
 
-    check = run(
-        ["virt-cat", "-a", str(BASE_IMAGE_PATH), "/root/.ssh/authorized_keys"],
-        check=False,
-    )
-    if pub_key_content not in check.stdout:
-        print("  + Re-injecting SSH key into image")
-        run(
-            [
-                "virt-customize",
-                "-a",
-                str(BASE_IMAGE_PATH),
-                "--mkdir",
-                "/root/.ssh",
-                "--chmod",
-                "0700:/root/.ssh",
-                "--write",
-                f"/root/.ssh/authorized_keys:{pub_key_content}",
-                "--chmod",
-                "0600:/root/.ssh/authorized_keys",
-            ]
-        )
+    print("  + Configuring base image")
+    run([
+        "virt-customize", "-a", str(BASE_IMAGE_PATH),
 
-    # Wildcard DHCP config — interface name changes with PCI topology
-    net_check = run(
+        # ---- SSH key ----
+        "--mkdir", "/root/.ssh",
+        "--chmod", "0700:/root/.ssh",
+        "--write", f"/root/.ssh/authorized_keys:{pub_key_content}",
+        "--chmod", "0600:/root/.ssh/authorized_keys",
+
+        # ---- Network: nuke old configs, force systemd-networkd ----
+        "--run-command",
+        # Remove ALL conflicting network configs
+        "rm -f /etc/network/interfaces.d/* "
+        "/etc/netplan/*.yaml "
+        "/etc/systemd/network/[0-8]*.network "
+        "2>/dev/null; "
+        # Interfaces: only loopback (disable ifupdown for real interfaces)
+        "printf 'auto lo\\niface lo inet loopback\\n' > /etc/network/interfaces; "
+        # Wildcard DHCP for any en* interface via systemd-networkd
+        "mkdir -p /etc/systemd/network && "
+        "printf '[Match]\\nName=en*\\n\\n[Network]\\nDHCP=yes\\n' "
+        "> /etc/systemd/network/99-dhcp-all.network; "
+        # Enable networkd, disable ifupdown
+        "systemctl enable systemd-networkd 2>/dev/null; "
+        "systemctl disable networking 2>/dev/null; "
+        # Fast wait-online: any interface, 10s timeout
+        "mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d && "
+        "printf '[Service]\\nExecStart=\\nExecStart=/lib/systemd/systemd-networkd-wait-online --any --timeout=10\\n' "
+        "> /etc/systemd/system/systemd-networkd-wait-online.service.d/any.conf; "
+        "true",
+
+        # ---- SSH server config ----
+        "--run-command",
+        "sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config; "
+        "sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config; "
+        "systemctl enable ssh 2>/dev/null; systemctl enable sshd 2>/dev/null; true",
+
+        # ---- Disable cloud-init ----
+        "--run-command",
+        "systemctl disable cloud-init cloud-init-local cloud-config cloud-final 2>/dev/null; "
+        "touch /etc/cloud/cloud-init.disabled; true",
+
+        # ---- Disable noisy services for faster boot ----
+        "--run-command",
+        "systemctl disable apt-daily.timer apt-daily-upgrade.timer man-db.timer "
+        "fstrim.timer e2scrub_all.timer unattended-upgrades.service docker.service "
+        "docker.socket containerd.service 2>/dev/null; "
+        "systemctl mask snapd.service snapd.socket 2>/dev/null; true",
+    ])
+
+    # Verify
+    v = run(
         ["virt-cat", "-a", str(BASE_IMAGE_PATH),
          "/etc/systemd/network/99-dhcp-all.network"],
         check=False,
     )
-    if net_check.returncode != 0 or "Name=en*" not in net_check.stdout:
-        print("  + Adding wildcard DHCP network config")
-        run([
-            "virt-customize", "-a", str(BASE_IMAGE_PATH),
-            "--write",
-            "/etc/systemd/network/99-dhcp-all.network:"
-            "[Match]\nName=en*\n\n[Network]\nDHCP=yes\n",
-            "--run-command",
-            "systemctl enable systemd-networkd 2>/dev/null; true",
-        ])
-
-    # Ensure PermitRootLogin for key auth
-    run([
-        "virt-customize", "-a", str(BASE_IMAGE_PATH),
-        "--run-command",
-        "sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config; "
-        "systemctl enable ssh 2>/dev/null; systemctl enable sshd 2>/dev/null; true",
-    ], check=False)
-
-    # Disable cloud-init to prevent datasource wait on every boot
-    ci_check = run(
-        ["virt-cat", "-a", str(BASE_IMAGE_PATH), "/etc/cloud/cloud-init.disabled"],
-        check=False,
-    )
-    if ci_check.returncode != 0:
-        print("  + Disabling cloud-init in base image")
-        run(
-            [
-                "virt-customize",
-                "-a",
-                str(BASE_IMAGE_PATH),
-                "--run-command",
-                "systemctl disable cloud-init cloud-init-local cloud-config cloud-final 2>/dev/null; "
-                "touch /etc/cloud/cloud-init.disabled",
-            ],
-            check=False,
-        )
+    if "Name=en*" in v.stdout:
+        print("  + Network: systemd-networkd wildcard DHCP")
+    else:
+        print("  ! WARNING: network config may not be correct")
 
 
 # ---------------------------------------------------------------------------
@@ -541,7 +538,7 @@ def _ssh_cmd(port, key_path, remote_cmd):
         "ssh",
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
-        "-o", "ConnectTimeout=5",
+        "-o", "ConnectTimeout=2",
         "-o", "BatchMode=yes",
         "-o", "LogLevel=ERROR",
         "-p", str(port),
@@ -648,12 +645,14 @@ def test_gpu_passthrough(gpu_addr):
                 _show_log_tail(qemu_log)
                 return False
 
-            print(f"  + QEMU running (pid {proc.pid}), waiting for SSH (up to 180s)")
+            print(f"  + QEMU running (pid {proc.pid}), waiting for SSH...")
 
             ssh_ready = False
-            deadline = time.time() + 180
+            deadline = time.time() + 120
+            attempts = 0
             while time.time() < deadline:
-                time.sleep(5)
+                time.sleep(3)
+                attempts += 1
                 if proc.poll() is not None:
                     print(f"  ! VM exited (code {proc.returncode})")
                     log_fh.flush()
@@ -665,7 +664,7 @@ def test_gpu_passthrough(gpu_addr):
                     break
 
             if not ssh_ready:
-                print("  ! SSH not ready after 180s")
+                print(f"  ! SSH not ready after {attempts} attempts")
                 _show_log_tail(qemu_log)
                 proc.terminate()
                 try:
@@ -1035,7 +1034,7 @@ def phase1(args):
     if args.debug:
         create_service(args.api_key, [], True, args.service_url)
         download_base_image()
-        inject_ssh_key()
+        prepare_base_image()
         start_service()
         print_success()
         return
@@ -1110,7 +1109,7 @@ def phase2_continue(api_key, gpus, service_url):
     print("\n-> IOMMU is active")
 
     download_base_image()
-    inject_ssh_key()
+    prepare_base_image()
 
     if gpus:
         run_gpu_test(gpus)
