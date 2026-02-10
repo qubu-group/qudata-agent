@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/qudata/agent/internal/domain"
 )
@@ -47,11 +48,18 @@ func (p *FileInfoProvider) GPUInfo(_ context.Context) (*domain.GPUInfo, error) {
 	}
 
 	return &domain.GPUInfo{
-		Name:    info.Name,
+		Name:    formatGPUName(info.Name),
 		Count:   count,
 		VRAM:    info.VRAMGB,
 		MaxCUDA: info.MaxCUDA,
 	}, nil
+}
+
+// formatGPUName removes "NVIDIA " prefix and collapses spaces: "NVIDIA Tesla T4" -> "TeslaT4".
+func formatGPUName(name string) string {
+	name = strings.TrimPrefix(name, "NVIDIA ")
+	name = strings.ReplaceAll(name, " ", "")
+	return name
 }
 
 // MockInfoProvider returns zero-value GPU info for debug mode.
