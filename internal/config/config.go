@@ -86,8 +86,15 @@ func Load() (*Config, error) {
 	if v := os.Getenv("QUDATA_VM_RUN_DIR"); v != "" {
 		cfg.VMRunDir = v
 	}
+	// Support both singular (legacy) and plural (install script)
 	if v := os.Getenv("QUDATA_GPU_PCI_ADDR"); v != "" {
-		cfg.GPUPCIAddr = v
+		cfg.GPUPCIAddr = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("QUDATA_GPU_PCI_ADDRS"); v != "" && cfg.GPUPCIAddr == "" {
+		addrs := strings.Split(v, ",")
+		if len(addrs) > 0 && strings.TrimSpace(addrs[0]) != "" {
+			cfg.GPUPCIAddr = strings.TrimSpace(addrs[0])
+		}
 	}
 	if v := os.Getenv("QUDATA_MANAGEMENT_KEY"); v != "" {
 		cfg.ManagementKeyPath = v

@@ -178,6 +178,10 @@ def configure_iommu(gpus, audio_devices):
     run(["update-initramfs", "-u"])
     run(["update-grub"])
     
+    # Disable NVIDIA Persistence Daemon on host (nvidia modules are blacklisted for VFIO)
+    run(["systemctl", "stop", "nvidia-persistenced.service"], check=False)
+    run(["systemctl", "disable", "nvidia-persistenced.service"], check=False)
+    
     print("  + Initramfs and GRUB updated")
     return True
 
