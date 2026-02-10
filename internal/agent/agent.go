@@ -89,16 +89,16 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	a.meta = meta
 
-	if meta.SecretDomain == "" {
-		return fmt.Errorf("secret_domain not received from API — cannot start FRPC tunnel")
+	if meta.TunnelToken == "" {
+		return fmt.Errorf("tunnel_token not received from API — cannot start FRPC tunnel")
 	}
 
-	if err := a.frpcProc.Start(meta.ID, meta.SecretDomain, meta.Port); err != nil {
+	if err := a.frpcProc.Start(meta.ID, meta.TunnelToken, meta.Port); err != nil {
 		return fmt.Errorf("start frpc: %w", err)
 	}
 	a.logger.Info("frpc tunnel established",
-		"subdomain", meta.SecretDomain,
-		"domain", meta.SecretDomain+frpc.DomainSuffix,
+		"tunnel_token", meta.TunnelToken,
+		"domain", meta.TunnelToken+frpc.DomainSuffix,
 	)
 
 	_ = a.store.ClearInstanceState()
@@ -130,7 +130,6 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.httpServer = server.New(
 		meta.Port,
 		meta.SecretKey,
-		meta.Subdomain(),
 		a.mgr,
 		a.frpcProc,
 		a.ports,
@@ -200,7 +199,7 @@ func (a *Agent) bootstrap(ctx context.Context) (*domain.AgentMetadata, error) {
 	a.logger.Info("init response",
 		"host_exists", initResp.HostExists,
 		"has_secret", initResp.SecretKey != "",
-		"secret_domain", initResp.SecretDomain,
+		"tunnel_token", initResp.TunnelToken,
 	)
 
 	secretKey := initResp.SecretKey
@@ -214,22 +213,15 @@ func (a *Agent) bootstrap(ctx context.Context) (*domain.AgentMetadata, error) {
 		}
 	}
 
-	secretDomain := initResp.SecretDomain
-	if secretDomain != "" {
-		_ = a.store.SaveSecretDomain(secretDomain)
-	} else {
-		secretDomain, _ = a.store.SecretDomain()
-	}
-
 	_ = a.store.SaveAPIKey(a.cfg.APIKey)
 
 	return &domain.AgentMetadata{
-		ID:           agentID,
-		Port:         agentPort,
-		Address:      address,
-		SecretKey:    secretKey,
-		SecretDomain: secretDomain,
-		HostExists:   initResp.HostExists,
+		ID:          agentID,
+		Port:        agentPort,
+		Address:     address,
+		SecretKey:   secretKey,
+		TunnelToken: initResp.TunnelToken,
+		HostExists:  initResp.HostExists,
 	}, nil
 }
 

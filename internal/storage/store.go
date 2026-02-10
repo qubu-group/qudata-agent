@@ -86,27 +86,6 @@ func (s *Store) Secret() (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-// SaveSecretDomain persists the secret domain received from the API.
-func (s *Store) SaveSecretDomain(domain string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return os.WriteFile(filepath.Join(s.dataDir, "secret_domain"), []byte(domain), 0o600)
-}
-
-// SecretDomain loads the persisted secret domain.
-func (s *Store) SecretDomain() (string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	data, err := os.ReadFile(filepath.Join(s.dataDir, "secret_domain"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", err
-	}
-	return strings.TrimSpace(string(data)), nil
-}
-
 // SaveInstanceState persists the running instance state.
 func (s *Store) SaveInstanceState(state *domain.InstanceState) error {
 	s.mu.Lock()

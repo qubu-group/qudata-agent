@@ -107,7 +107,7 @@ func (c *Config) Render() ([]byte, error) {
 
 // BuildInstanceProxies creates FRP proxy entries for a VM instance.
 // SSH: TCP proxy with remotePort from the SSH range (10000-15000).
-// App ports: HTTP proxies with customDomains = ["<secret_domain>.ru1.qudata.ai:<remotePort>"].
+// App ports: HTTP proxies with customDomains = ["<tunnel_token>:<remotePort>"].
 func BuildInstanceProxies(secretDomain string, hostPorts []int, sshRemotePort int, sshEnabled bool, ports []PortSpec) []Proxy {
 	var proxies []Proxy
 	idx := 0

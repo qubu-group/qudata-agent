@@ -19,22 +19,15 @@ type InitAgentRespData struct {
 	EmergencyReinit bool   `json:"emergency_reinit"`
 	HostExists      bool   `json:"host_exists"`
 	SecretKey       string `json:"secret_key"`
-	SecretDomain    string `json:"secret_domain"`
+	TunnelToken     string `json:"tunnel_token"`
 	InstanceRunning bool   `json:"instance_running"`
 }
 
 type AgentMetadata struct {
-	ID           string
-	Port         int
-	Address      string
-	SecretKey    string
-	SecretDomain string
-	HostExists   bool
-}
-
-func (m *AgentMetadata) Subdomain() string {
-	if m != nil {
-		return m.SecretDomain
-	}
-	return ""
+	ID          string
+	Port        int
+	Address     string
+	SecretKey   string
+	TunnelToken string
+	HostExists  bool
 }

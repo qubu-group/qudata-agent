@@ -42,12 +42,12 @@ func (h *Handler) Ping(c *gin.Context) {
 }
 
 type createInstanceRequest struct {
-	Ports        []portRequest `json:"ports" binding:"required"`
-	SSHEnabled   bool          `json:"ssh_enabled"`
-	SecretDomain string        `json:"secret_domain" binding:"required"`
-	DiskSizeGB   int           `json:"disk_size_gb"`
-	CPUs         string        `json:"cpus"`
-	Memory       string        `json:"memory"`
+	Ports       []portRequest `json:"ports" binding:"required"`
+	SSHEnabled  bool          `json:"ssh_enabled"`
+	TunnelToken string        `json:"tunnel_token" binding:"required"`
+	DiskSizeGB  int           `json:"disk_size_gb"`
+	CPUs        string        `json:"cpus"`
+	Memory      string        `json:"memory"`
 }
 
 type portRequest struct {
@@ -64,11 +64,11 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 	}
 
 	spec := domain.InstanceSpec{
-		SSHEnabled:   req.SSHEnabled,
-		SecretDomain: req.SecretDomain,
-		DiskSizeGB:   req.DiskSizeGB,
-		CPUs:         req.CPUs,
-		Memory:       req.Memory,
+		SSHEnabled:  req.SSHEnabled,
+		TunnelToken: req.TunnelToken,
+		DiskSizeGB:  req.DiskSizeGB,
+		CPUs:        req.CPUs,
+		Memory:      req.Memory,
 	}
 	for _, p := range req.Ports {
 		spec.Ports = append(spec.Ports, domain.PortMapping{
@@ -146,17 +146,17 @@ func (h *Handler) startInstance(ctx context.Context, spec domain.InstanceSpec, h
 		})
 	}
 
-	proxies := frpc.BuildInstanceProxies(spec.SecretDomain, hostPorts, sshRemotePort, spec.SSHEnabled, portSpecs)
+	proxies := frpc.BuildInstanceProxies(spec.TunnelToken, hostPorts, sshRemotePort, spec.SSHEnabled, portSpecs)
 	if err := h.frpc.UpdateInstanceProxies(proxies); err != nil {
 		h.logger.Error("failed to update frpc proxies", "err", err)
 	}
 
 	state := &domain.InstanceState{
-		VMID:         h.vm.VMID(),
-		Ports:        portMap,
-		SSHEnabled:   spec.SSHEnabled,
-		GPUAddr:      spec.GPUAddr,
-		SecretDomain: spec.SecretDomain,
+		VMID:        h.vm.VMID(),
+		Ports:       portMap,
+		SSHEnabled:  spec.SSHEnabled,
+		GPUAddr:     spec.GPUAddr,
+		TunnelToken: spec.TunnelToken,
 	}
 	if err := h.store.SaveInstanceState(state); err != nil {
 		h.logger.Error("failed to save instance state", "err", err)

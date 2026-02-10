@@ -22,7 +22,6 @@ type Server struct {
 func New(
 	port int,
 	secret string,
-	subdomain string,
 	vm domain.VMManager,
 	frpcProc *frpc.Process,
 	ports *network.PortAllocator,
