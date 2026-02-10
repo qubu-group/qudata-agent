@@ -225,6 +225,10 @@ def create_cloud_init_iso(ssh_pubkey):
               iface eth0 inet dhcp
 
         runcmd:
+          # Disable interactive prompts for apt
+          - export DEBIAN_FRONTEND=noninteractive
+          - echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
+          
           # Wait for network
           - |
             for i in $(seq 1 30); do
@@ -233,25 +237,25 @@ def create_cloud_init_iso(ssh_pubkey):
             done
           
           # Update and install base packages
-          - apt-get update
-          - apt-get install -y openssh-server curl wget gnupg ca-certificates
+          - DEBIAN_FRONTEND=noninteractive apt-get update
+          - DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" openssh-server curl wget gnupg ca-certificates
           
           # Install NVIDIA driver
-          - apt-get install -y nvidia-driver || true
+          - DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" nvidia-driver || true
           
           # Install Docker
           - install -m 0755 -d /etc/apt/keyrings
           - curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
           - chmod a+r /etc/apt/keyrings/docker.asc
           - echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list
-          - apt-get update
-          - apt-get install -y docker-ce docker-ce-cli containerd.io
+          - DEBIAN_FRONTEND=noninteractive apt-get update
+          - DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" docker-ce docker-ce-cli containerd.io
           
           # Install NVIDIA Container Toolkit
           - curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
           - 'curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed "s#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g" > /etc/apt/sources.list.d/nvidia-container-toolkit.list'
-          - apt-get update
-          - apt-get install -y nvidia-container-toolkit
+          - DEBIAN_FRONTEND=noninteractive apt-get update
+          - DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" nvidia-container-toolkit
           - nvidia-ctk runtime configure --runtime=docker || true
           
           # Configure SSH
@@ -354,7 +358,6 @@ def download_base_image():
                 raise TimeoutError("VM customization timed out after 20 minutes")
             
             # Read output with timeout
-            import select
             if select.select([proc.stdout], [], [], 1.0)[0]:
                 line = proc.stdout.readline()
                 if line:
