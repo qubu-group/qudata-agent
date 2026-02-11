@@ -288,6 +288,10 @@ def create_cloud_init_iso(ssh_pubkey):
           - apt-get update
           - apt-get install -y openssh-server curl wget gnupg ca-certificates
 
+          - sed -i 's/Components: main/Components: main restricted/' /etc/apt/sources.list.d/ubuntu.sources
+          - apt-get update
+          - apt-get install -y nvidia-driver-560 || apt-get install -y nvidia-driver || true
+
           - mkdir -p /root/.ssh
           - chmod 700 /root/.ssh
           - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
@@ -359,7 +363,7 @@ def download_base_image():
     print("  + Creating cloud-init config")
     ci_iso = create_cloud_init_iso(ssh_pubkey)
 
-    print("  + Starting VM for initial customisation")
+    print("  + Starting VM for customisation (may take 10-15 min with driver install)")
 
     qemu_cmd = [
         "qemu-system-x86_64",
@@ -655,22 +659,8 @@ def _save_gpu_info(ssh_port, ssh_key):
         print(f"  ! Warning: could not save GPU info: {e}")
 
 
-def _shutdown_vm(proc, ssh_port, ssh_key):
-    """Gracefully shutdown a test VM."""
-    run(_ssh_cmd(ssh_port, ssh_key, "poweroff"), check=False)
-    try:
-        proc.wait(timeout=20)
-    except subprocess.TimeoutExpired:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-
-
 def test_gpu_passthrough(gpu_addr):
-    """Boot a test VM with GPU passthrough, verify/install NVIDIA driver, save GPU info."""
+    """Boot a test VM with GPU passthrough, verify nvidia-smi, tear down."""
     print("\n-> Testing GPU passthrough")
     print(f"  + GPU: {gpu_addr}")
 
@@ -797,7 +787,6 @@ def test_gpu_passthrough(gpu_addr):
 
             # ---- Test nvidia-smi ----
 
-            driver_installed = False
             print("  + SSH ready, checking nvidia-smi")
             r = run(
                 _ssh_cmd(ssh_port, ssh_key,
@@ -806,74 +795,31 @@ def test_gpu_passthrough(gpu_addr):
                 check=False,
             )
 
-            if r.returncode != 0 or not r.stdout.strip():
-                print("  + NVIDIA driver not found — installing (5-10 min)...")
-                # Enable restricted repository (nvidia-driver packages live there)
-                ir = run(
-                    _ssh_cmd(ssh_port, ssh_key,
-                             "sed -i 's/Components: main/Components: main restricted/' "
-                             "/etc/apt/sources.list.d/ubuntu.sources && "
-                             "apt-get update -qq && "
-                             "DEBIAN_FRONTEND=noninteractive "
-                             "apt-get install -y nvidia-driver-560 || "
-                             "DEBIAN_FRONTEND=noninteractive "
-                             "apt-get install -y nvidia-driver"),
-                    check=False,
-                )
-                if ir.returncode != 0:
-                    print("  ! Driver installation failed")
-                    if ir.stderr:
-                        print(f"    {ir.stderr.strip()[:300]}")
-                    _shutdown_vm(proc, ssh_port, ssh_key)
-                    return False
-
-                driver_installed = True
-                print("  + Driver installed, rebooting VM")
-                run(_ssh_cmd(ssh_port, ssh_key, "reboot"), check=False)
-                time.sleep(15)
-
-                # Wait for SSH after reboot
-                reboot_ok = False
-                reboot_deadline = time.time() + 120
-                while time.time() < reboot_deadline:
-                    time.sleep(3)
-                    if proc.poll() is not None:
-                        print("  ! VM exited during reboot")
-                        return False
-                    if run(_ssh_cmd(ssh_port, ssh_key, "true"), check=False).returncode == 0:
-                        reboot_ok = True
-                        break
-
-                if not reboot_ok:
-                    print("  ! SSH not ready after reboot")
-                    _shutdown_vm(proc, ssh_port, ssh_key)
-                    return False
-
-                # Re-check nvidia-smi
-                r = run(
-                    _ssh_cmd(ssh_port, ssh_key,
-                             "nvidia-smi --query-gpu=name,memory.total,driver_version "
-                             "--format=csv,noheader,nounits"),
-                    check=False,
-                )
-
-            success = r.returncode == 0 and bool(r.stdout.strip())
-            if success:
+            success = False
+            if r.returncode == 0 and r.stdout.strip():
                 print(f"  + GPU in VM: {r.stdout.strip().splitlines()[0]}")
+                success = True
                 _save_gpu_info(ssh_port, ssh_key)
             else:
-                print("  ! nvidia-smi still failing after driver install")
+                print("  ! nvidia-smi failed inside VM")
+                if r.stdout:
+                    print(f"    stdout: {r.stdout.strip()[:300]}")
                 if r.stderr:
-                    print(f"    {r.stderr.strip()[:300]}")
+                    print(f"    stderr: {r.stderr.strip()[:300]}")
 
             # ---- Shutdown ----
 
-            _shutdown_vm(proc, ssh_port, ssh_key)
-
-            # Persist driver installation into base image
-            if driver_installed and success:
-                print("  + Saving driver to base image")
-                run(["qemu-img", "commit", str(overlay)])
+            print("  + Shutting down test VM")
+            run(_ssh_cmd(ssh_port, ssh_key, "poweroff"), check=False)
+            try:
+                proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
 
         return success
 
