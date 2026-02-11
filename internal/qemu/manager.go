@@ -62,6 +62,7 @@ type Manager struct {
 	ovmfVarsPath string
 	done         chan struct{}
 	portPool     map[int]int
+	sshReady     chan struct{} // closed when VM SSH is ready after Create
 }
 
 func NewManager(cfg Config, logger *slog.Logger) *Manager {
@@ -231,6 +232,7 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 	m.qmpSocket = qmpSocket
 	m.gpuAddr = gpuAddr
 	m.ovmfVarsPath = ovmfVarsPath
+	m.sshReady = make(chan struct{})
 
 	m.done = make(chan struct{})
 	go func() {
@@ -251,6 +253,9 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 	m.logger.Info("VM started", "vm_id", vmID, "pid", cmd.Process.Pid)
 
 	sshPort, hasSSH := pool[22]
+	if !hasSSH {
+		close(m.sshReady)
+	}
 	if hasSSH {
 		sshClient := NewSSHClient("127.0.0.1", sshPort, m.sshKeyPath)
 
@@ -260,6 +265,7 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 
 		if sshErr != nil {
 			m.logger.Error("VM SSH timeout", "err", sshErr)
+			close(m.sshReady)
 			m.stopLocked(context.Background())
 			return nil, fmt.Errorf("VM SSH not ready: %w", sshErr)
 		}
@@ -295,6 +301,8 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 		if out, err := sshClient.Run(ctx, enablePassAuth); err != nil {
 			m.logger.Warn("failed to enable password auth", "err", err, "output", string(out))
 		}
+
+		close(m.sshReady)
 	}
 
 	portMap := make(domain.InstancePorts, len(pool))
@@ -463,13 +471,34 @@ func parseVMStats(output string) *domain.StatsSnapshot {
 	return snap
 }
 
+func (m *Manager) waitSSHReady(ctx context.Context) error {
+	m.mu.Lock()
+	ch := m.sshReady
+	m.mu.Unlock()
+	if ch == nil {
+		return fmt.Errorf("no VM running")
+	}
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (m *Manager) AddSSHKey(_ context.Context, pubkey string) error {
 	pubkey = strings.TrimSpace(pubkey)
 	if pubkey == "" {
 		return fmt.Errorf("empty SSH public key")
 	}
 
-	// Use a dedicated context with generous timeout — never inherit the short HTTP request context.
+	// Wait for VM SSH to be ready (Create runs in background).
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer waitCancel()
+	if err := m.waitSSHReady(waitCtx); err != nil {
+		return fmt.Errorf("VM not ready: %w", err)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -493,6 +522,12 @@ func (m *Manager) RemoveSSHKey(_ context.Context, pubkey string) error {
 	pubkey = strings.TrimSpace(pubkey)
 	if pubkey == "" {
 		return fmt.Errorf("empty SSH public key")
+	}
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer waitCancel()
+	if err := m.waitSSHReady(waitCtx); err != nil {
+		return fmt.Errorf("VM not ready: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -630,6 +665,7 @@ func (m *Manager) cleanup() {
 	m.gpuAddr = ""
 	m.ovmfVarsPath = ""
 	m.done = nil
+	m.sshReady = nil
 }
 
 func allocatePortPool(guestPorts []int) (map[int]int, error) {
