@@ -31,6 +31,7 @@ type Config struct {
 	DefaultCPUs   string
 	DefaultMemory string
 	DiskSizeGB    int
+	TestMode      bool
 }
 
 type Manager struct {
@@ -45,6 +46,7 @@ type Manager struct {
 	defaultCPU   string
 	defaultMem   string
 	diskSizeGB   int
+	testMode     bool
 	images       *ImageManager
 
 	mu           sync.Mutex
@@ -88,6 +90,7 @@ func NewManager(cfg Config, logger *slog.Logger) *Manager {
 		defaultCPU:   cpus,
 		defaultMem:   mem,
 		diskSizeGB:   diskGB,
+		testMode:     cfg.TestMode,
 		images:       NewImageManager(cfg.ImageDir),
 	}
 }
@@ -179,7 +182,7 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 		pool[gp] = hostPorts[i]
 	}
 
-	netCfg := NewNetworkConfig("net0")
+	netCfg := NewNetworkConfig("net0", m.testMode)
 	for guestPort, hostPort := range pool {
 		netCfg.AddForward("tcp", hostPort, guestPort)
 	}
@@ -379,11 +382,16 @@ func (m *Manager) HostPortForGuest(guestPort int) (int, bool) {
 	return hp, ok
 }
 
-func (m *Manager) AddSSHKey(ctx context.Context, pubkey string) error {
+func (m *Manager) AddSSHKey(_ context.Context, pubkey string) error {
 	pubkey = strings.TrimSpace(pubkey)
 	if pubkey == "" {
 		return fmt.Errorf("empty SSH public key")
 	}
+
+	// Use a dedicated context with generous timeout — never inherit the short HTTP request context.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	cmd := fmt.Sprintf(
 		`mkdir -p /root/.ssh && chmod 700 /root/.ssh && echo '%s' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys`,
 		pubkey,
@@ -395,17 +403,20 @@ func (m *Manager) AddSSHKey(ctx context.Context, pubkey string) error {
 		return fmt.Errorf("add ssh key: %w: %s", err, string(out))
 	}
 
-	// Verify key was added.
 	verifyOut, verifyErr := m.sshExec(ctx, "wc -l /root/.ssh/authorized_keys")
 	m.logger.Info("SSH key injected", "authorized_keys_check", strings.TrimSpace(string(verifyOut)), "verify_err", verifyErr)
 	return nil
 }
 
-func (m *Manager) RemoveSSHKey(ctx context.Context, pubkey string) error {
+func (m *Manager) RemoveSSHKey(_ context.Context, pubkey string) error {
 	pubkey = strings.TrimSpace(pubkey)
 	if pubkey == "" {
 		return fmt.Errorf("empty SSH public key")
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	escaped := strings.ReplaceAll(pubkey, "/", `\/`)
 	cmd := fmt.Sprintf(`sed -i '/%s/d' /root/.ssh/authorized_keys`, escaped)
 	if out, err := m.sshExec(ctx, cmd); err != nil {

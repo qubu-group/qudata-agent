@@ -63,6 +63,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Agent, error) {
 		DefaultCPUs:   cfg.VMDefaultCPUs,
 		DefaultMemory: cfg.VMDefaultMemory,
 		DiskSizeGB:    cfg.VMDiskSizeGB,
+		TestMode:      cfg.TestMode,
 	}, logger)
 
 	api := qudata.NewClient(cfg.APIKey, cfg.ServiceURL, logger)
