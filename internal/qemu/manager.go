@@ -267,12 +267,33 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 		m.sshClient = sshClient
 		m.logger.Info("VM SSH ready", "vm_id", vmID)
 
+		// Ensure management SSH key is in authorized_keys (cloud-init may overwrite on boot).
+		if m.sshKeyPath != "" {
+			pubKeyPath := m.sshKeyPath + ".pub"
+			if pubData, err := os.ReadFile(pubKeyPath); err == nil {
+				pubKey := strings.TrimSpace(string(pubData))
+				ensureCmd := fmt.Sprintf(
+					`mkdir -p /root/.ssh && chmod 700 /root/.ssh && grep -qF '%s' /root/.ssh/authorized_keys 2>/dev/null || echo '%s' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys`,
+					pubKey, pubKey,
+				)
+				if out, err := sshClient.Run(ctx, ensureCmd); err != nil {
+					m.logger.Warn("failed to ensure management key", "err", err, "output", string(out))
+				}
+			}
+		}
+
 		// Set root password and log it.
 		rootPass := generatePassword(16)
 		if out, err := sshClient.Run(ctx, fmt.Sprintf("echo 'root:%s' | chpasswd", rootPass)); err != nil {
 			m.logger.Warn("failed to set root password", "err", err, "output", string(out))
 		} else {
 			m.logger.Info("VM root credentials", "username", "root", "password", rootPass)
+		}
+
+		// Allow PasswordAuthentication for user SSH access.
+		enablePassAuth := `sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null; true`
+		if out, err := sshClient.Run(ctx, enablePassAuth); err != nil {
+			m.logger.Warn("failed to enable password auth", "err", err, "output", string(out))
 		}
 	}
 

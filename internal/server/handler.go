@@ -123,9 +123,16 @@ func (h *Handler) createTestInstance(c *gin.Context, req createInstanceRequest) 
 	}
 	hostPorts := []int{sshPort, ollamaPort}
 
-	go h.startVM(context.Background(), spec, hostPorts)
+	// Start VM synchronously - wait for it to be ready before responding
+	portMap, err := h.vm.Create(c.Request.Context(), spec, hostPorts)
+	if err != nil {
+		h.ports.Release(sshPort, ollamaPort)
+		h.logger.Error("instance creation failed", "err", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
 
-	h.logger.Info("instance created (test)", "ssh", sshPort, "ollama", ollamaPort)
+	h.logger.Info("instance created (test)", "ssh", sshPort, "ollama", ollamaPort, "ports", portMap)
 	c.JSON(http.StatusOK, gin.H{
 		"ok": true,
 		"data": gin.H{
