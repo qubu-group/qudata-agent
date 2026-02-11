@@ -46,19 +46,20 @@ func (h *Handler) Ping(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-type portRequest struct {
-	Name      string `json:"name"`
-	GuestPort int    `json:"guest_port" binding:"required"`
-	Proto     string `json:"proto" binding:"required"`
-}
-
 type createInstanceRequest struct {
-	TunnelToken string        `json:"tunnel_token"` // required only in non-test mode
-	SSHEnabled  bool          `json:"ssh_enabled"`
-	Ports       []portRequest `json:"ports"`
-	DiskSizeGB  int           `json:"disk_size_gb"`
-	CPUs        string        `json:"cpus"`
-	Memory      string        `json:"memory"`
+	TunnelToken  string            `json:"tunnel_token"` // required only in non-test mode
+	SSHEnabled   bool              `json:"ssh_enabled"`
+	Ports        []string          `json:"ports"` // e.g. ["22", "8080"]
+	StorageGB    int               `json:"storage_gb"`
+	Image        string            `json:"image"`
+	ImageTag     string            `json:"image_tag"`
+	Registry     *string           `json:"registry"`
+	Login        *string           `json:"login"`
+	Password     *string           `json:"password"`
+	EnvVariables map[string]string `json:"env_variables"`
+	Command      *string           `json:"command"`
+	CPUs         string            `json:"cpus"`
+	Memory       string            `json:"memory"`
 }
 
 func (h *Handler) CreateInstance(c *gin.Context) {
@@ -113,7 +114,7 @@ func (h *Handler) createTestInstance(c *gin.Context, req createInstanceRequest) 
 	spec := domain.InstanceSpec{
 		SSHEnabled:  true,
 		TunnelToken: req.TunnelToken,
-		DiskSizeGB:  req.DiskSizeGB,
+		DiskSizeGB:  req.StorageGB,
 		CPUs:        req.CPUs,
 		Memory:      req.Memory,
 		Ports: []domain.PortMapping{
@@ -172,7 +173,19 @@ func (h *Handler) createFRPCInstance(c *gin.Context, req createInstanceRequest) 
 		hostPorts = append(hostPorts, local)
 	}
 
-	for _, p := range req.Ports {
+	for _, portStr := range req.Ports {
+		// Skip SSH port if ssh_enabled (handled separately above)
+		if portStr == "22" && req.SSHEnabled {
+			continue
+		}
+
+		guestPort, err := strconv.Atoi(portStr)
+		if err != nil {
+			rollback()
+			c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "invalid port: " + portStr})
+			return
+		}
+
 		local, err := h.ports.AllocateOne()
 		if err != nil {
 			rollback()
@@ -191,17 +204,17 @@ func (h *Handler) createFRPCInstance(c *gin.Context, req createInstanceRequest) 
 
 		hostPorts = append(hostPorts, local)
 		portMappings = append(portMappings, domain.PortMapping{
-			Name:       p.Name,
-			GuestPort:  p.GuestPort,
+			Name:       "port-" + portStr,
+			GuestPort:  guestPort,
 			RemotePort: remote,
-			Proto:      p.Proto,
+			Proto:      "tcp",
 		})
 	}
 
 	spec := domain.InstanceSpec{
 		SSHEnabled:  req.SSHEnabled,
 		TunnelToken: req.TunnelToken,
-		DiskSizeGB:  req.DiskSizeGB,
+		DiskSizeGB:  req.StorageGB,
 		CPUs:        req.CPUs,
 		Memory:      req.Memory,
 		Ports:       portMappings,
