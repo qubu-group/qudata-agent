@@ -7,6 +7,7 @@ type InitAgentRequest struct {
 	Fingerprint string `json:"fingerprint"`
 	PID         int    `json:"pid"`
 	Version     string `json:"version"`
+	TestMode    bool   `json:"test_mode,omitempty"`
 }
 
 type InitAgentResponse struct {

@@ -187,6 +187,7 @@ func (a *Agent) bootstrap(ctx context.Context) (*domain.AgentMetadata, error) {
 		Fingerprint: fingerprint,
 		PID:         os.Getpid(),
 		Version:     config.Version,
+		TestMode:    a.cfg.TestMode,
 	}
 
 	a.logger.Info("initializing agent",
