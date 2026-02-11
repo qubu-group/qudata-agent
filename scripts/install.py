@@ -514,6 +514,11 @@ def prepare_base_image():
         "echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen; "
         "locale-gen en_US.UTF-8 2>/dev/null; true",
 
+        # Enable restricted repository (contains NVIDIA drivers)
+        "--run-command",
+        "sed -i 's/Components: main/Components: main restricted/' "
+        "/etc/apt/sources.list.d/ubuntu.sources 2>/dev/null; true",
+
         # Disable cloud-init
         "--run-command",
         "systemctl disable cloud-init cloud-init-local cloud-config cloud-final 2>/dev/null; "
@@ -803,8 +808,11 @@ def test_gpu_passthrough(gpu_addr):
 
             if r.returncode != 0 or not r.stdout.strip():
                 print("  + NVIDIA driver not found — installing (5-10 min)...")
+                # Enable restricted repository (nvidia-driver packages live there)
                 ir = run(
                     _ssh_cmd(ssh_port, ssh_key,
+                             "sed -i 's/Components: main/Components: main restricted/' "
+                             "/etc/apt/sources.list.d/ubuntu.sources && "
                              "apt-get update -qq && "
                              "DEBIAN_FRONTEND=noninteractive "
                              "apt-get install -y nvidia-driver-560 || "
