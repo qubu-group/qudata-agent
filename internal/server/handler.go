@@ -17,11 +17,12 @@ import (
 const ollamaGuestPort = 11434
 
 type Handler struct {
-	vm     domain.VMManager
-	frpc   *frpc.Process
-	ports  *network.PortAllocator
-	store  *storage.Store
-	logger *slog.Logger
+	vm       domain.VMManager
+	frpc     *frpc.Process
+	ports    *network.PortAllocator
+	store    *storage.Store
+	logger   *slog.Logger
+	testMode bool
 }
 
 func NewHandler(
@@ -30,13 +31,15 @@ func NewHandler(
 	ports *network.PortAllocator,
 	store *storage.Store,
 	logger *slog.Logger,
+	testMode bool,
 ) *Handler {
 	return &Handler{
-		vm:     vm,
-		frpc:   frpc,
-		ports:  ports,
-		store:  store,
-		logger: logger,
+		vm:       vm,
+		frpc:     frpc,
+		ports:    ports,
+		store:    store,
+		logger:   logger,
+		testMode: testMode,
 	}
 }
 
@@ -58,7 +61,63 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 		return
 	}
 
-	// SSH: guest 22 → TCP remotePort from 10000-15000
+	if h.testMode {
+		h.createInstanceTestMode(c, req)
+	} else {
+		h.createInstanceFRPC(c, req)
+	}
+}
+
+// createInstanceTestMode — ports open directly on 0.0.0.0, no FRPC.
+func (h *Handler) createInstanceTestMode(c *gin.Context, req createInstanceRequest) {
+	// SSH: host port from SSH range, directly accessible.
+	sshPort, err := h.ports.AllocateSSHPort()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "ssh port: " + err.Error()})
+		return
+	}
+
+	// Ollama: host port from app range, directly accessible.
+	ollamaPorts, err := h.ports.AllocateAppPorts(1)
+	if err != nil {
+		h.ports.Release(sshPort)
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "ollama port: " + err.Error()})
+		return
+	}
+	ollamaPort := ollamaPorts[0]
+
+	spec := domain.InstanceSpec{
+		SSHEnabled:  true,
+		TunnelToken: req.TunnelToken,
+		DiskSizeGB:  req.DiskSizeGB,
+		CPUs:        req.CPUs,
+		Memory:      req.Memory,
+		Ports: []domain.PortMapping{
+			{Name: "ollama", GuestPort: ollamaGuestPort, RemotePort: ollamaPort, Proto: "http"},
+		},
+	}
+
+	// In test mode hostPorts = external ports (QEMU binds to 0.0.0.0).
+	hostPorts := []int{sshPort, ollamaPort}
+
+	go h.startInstance(context.Background(), spec, hostPorts, sshPort)
+
+	h.logger.Info("instance created (test mode)", "ssh_port", sshPort, "ollama_port", ollamaPort)
+
+	c.JSON(http.StatusOK, gin.H{
+		"ok": true,
+		"data": gin.H{
+			"ports": gin.H{
+				"22":    strconv.Itoa(sshPort),
+				"11434": strconv.Itoa(ollamaPort),
+			},
+		},
+	})
+}
+
+// createInstanceFRPC — ports proxied via FRPC tunnels.
+func (h *Handler) createInstanceFRPC(c *gin.Context, req createInstanceRequest) {
+	// SSH: FRPC TCP remote port (10000-15000), separate local host port.
 	sshRemotePort, err := h.ports.AllocateSSHPort()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "ssh port: " + err.Error()})
@@ -72,7 +131,7 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 		return
 	}
 
-	// Ollama: guest 11434 → HTTP on app port
+	// Ollama: local host port + FRPC HTTP remote port.
 	ollamaHostPort, err := h.ports.AllocateAppPorts(1)
 	if err != nil {
 		h.ports.Release(sshRemotePort)
@@ -81,7 +140,6 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 		return
 	}
 
-	// Ollama remote port for customDomains = ["token:<port>"]
 	ollamaRemotePort, err := h.ports.AllocateAppPorts(1)
 	if err != nil {
 		h.ports.Release(sshRemotePort)
@@ -102,7 +160,6 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 		},
 	}
 
-	// hostPorts order: [sshHost, ollamaHost] — matches BuildInstanceProxies expectations.
 	hostPorts := []int{sshHostPort[0], ollamaHostPort[0]}
 
 	go h.startInstance(context.Background(), spec, hostPorts, sshRemotePort)

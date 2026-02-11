@@ -520,6 +520,11 @@ def prepare_base_image():
         "fstrim.timer e2scrub_all.timer unattended-upgrades.service docker.service "
         "docker.socket containerd.service 2>/dev/null; "
         "systemctl mask snapd.service snapd.socket 2>/dev/null; true",
+
+        # Fix locale warnings
+        "--run-command",
+        "apt-get install -y locales-all 2>/dev/null; "
+        "touch /var/lib/cloud/instance/locale-check.skip; true",
     ])
 
     # Verify

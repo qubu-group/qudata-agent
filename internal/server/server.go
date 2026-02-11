@@ -36,7 +36,7 @@ func New(
 	router.Use(LoggingMiddleware(logger))
 	router.Use(AuthMiddleware(secret))
 
-	h := NewHandler(vm, frpcProc, ports, store, logger)
+	h := NewHandler(vm, frpcProc, ports, store, logger, testMode)
 
 	router.GET("/ping", h.Ping)
 	router.GET("/instances", h.GetInstance)
