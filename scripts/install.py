@@ -778,9 +778,33 @@ def test_gpu_passthrough(gpu_addr):
                     proc.wait()
                 return False
 
+            print("  + SSH ready, checking nvidia-smi")
+            r = run(_ssh_cmd(ssh_port, ssh_key, "which nvidia-smi"), check=False)
+
+            if r.returncode != 0:
+                print("  + nvidia-smi not found, installing NVIDIA driver...")
+                install_cmd = (
+                    "export DEBIAN_FRONTEND=noninteractive; "
+                    "apt-get update -qq && "
+                    "apt-get install -y -qq nvidia-driver-560 || "
+                    "apt-get install -y -qq nvidia-driver || "
+                    "{ "
+                    '  distribution=$(. /etc/os-release; echo ${ID}${VERSION_ID} | sed "s/\\.//g"); '
+                    "  wget -q https://developer.download.nvidia.com/compute/cuda/repos/${distribution}/x86_64/cuda-keyring_1.1-1_all.deb; "
+                    "  dpkg -i cuda-keyring_1.1-1_all.deb; "
+                    "  apt-get update -qq && apt-get install -y -qq cuda-drivers; "
+                    "}"
+                )
+                dr = run(_ssh_cmd(ssh_port, ssh_key, install_cmd), check=False)
+                if dr.returncode != 0:
+                    print("  ! NVIDIA driver installation failed")
+                    if dr.stderr:
+                        print(f"    {dr.stderr.strip()[-300:]}")
+                else:
+                    print("  + NVIDIA driver installed")
+
             # ---- Test nvidia-smi ----
 
-            print("  + SSH ready, checking nvidia-smi")
             r = run(
                 _ssh_cmd(ssh_port, ssh_key,
                          "nvidia-smi --query-gpu=name,memory.total,driver_version "
@@ -813,6 +837,12 @@ def test_gpu_passthrough(gpu_addr):
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
+
+        # Commit overlay changes (installed drivers, etc.) back into the base image.
+        if success:
+            run([
+                "qemu-img", "commit", str(overlay),
+            ], check=False)
 
         return success
 
