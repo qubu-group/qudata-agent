@@ -35,8 +35,8 @@ REPO_URL = os.environ.get(
 GO_VERSION = "1.23.4"
 FRP_VERSION = "0.61.1"
 
-UBUNTU_CLOUD_IMAGE = (
-    "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+DEBIAN_CLOUD_IMAGE = (
+    "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
 )
 BASE_IMAGE_PATH = IMAGE_DIR / "qudata-base.qcow2"
 
@@ -275,8 +275,14 @@ def create_cloud_init_iso(ssh_pubkey):
         ssh_authorized_keys:
           - {ssh_pubkey}
 
+        write_files:
+          - path: /etc/apt/sources.list
+            content: |
+              deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
+              deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
+              deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
+
         runcmd:
-          - export DEBIAN_FRONTEND=noninteractive
           - echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
 
           - |
@@ -285,12 +291,10 @@ def create_cloud_init_iso(ssh_pubkey):
               sleep 2
             done
 
-          - apt-get update
-          - apt-get install -y openssh-server curl wget gnupg ca-certificates
+          - DEBIAN_FRONTEND=noninteractive apt-get update
+          - DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" openssh-server curl wget gnupg ca-certificates
 
-          - sed -i 's/Components: main/Components: main restricted/' /etc/apt/sources.list.d/ubuntu.sources
-          - apt-get update
-          - apt-get install -y nvidia-driver-560 || apt-get install -y nvidia-driver || true
+          - DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" nvidia-driver || true
 
           - mkdir -p /root/.ssh
           - chmod 700 /root/.ssh
@@ -340,7 +344,7 @@ def create_cloud_init_iso(ssh_pubkey):
 
 
 def download_base_image():
-    print("\n-> Preparing base image (Ubuntu)")
+    print("\n-> Preparing base image (Debian)")
 
     IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -350,9 +354,9 @@ def download_base_image():
 
     ssh_pubkey = generate_ssh_key()
 
-    print("  + Downloading Ubuntu cloud image")
-    tmp_image = IMAGE_DIR / "ubuntu-cloud.qcow2"
-    urllib.request.urlretrieve(UBUNTU_CLOUD_IMAGE, tmp_image)
+    print("  + Downloading Debian cloud image")
+    tmp_image = IMAGE_DIR / "debian-cloud.qcow2"
+    urllib.request.urlretrieve(DEBIAN_CLOUD_IMAGE, tmp_image)
 
     print("  + Resizing to 20 GB")
     run(["qemu-img", "resize", str(tmp_image), "20G"])
@@ -517,11 +521,6 @@ def prepare_base_image():
         "echo 'LANG=en_US.UTF-8' > /etc/default/locale; "
         "echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen; "
         "locale-gen en_US.UTF-8 2>/dev/null; true",
-
-        # Enable restricted repository (contains NVIDIA drivers)
-        "--run-command",
-        "sed -i 's/Components: main/Components: main restricted/' "
-        "/etc/apt/sources.list.d/ubuntu.sources 2>/dev/null; true",
 
         # Disable cloud-init
         "--run-command",
