@@ -1020,13 +1020,16 @@ def install_base():
 def install_qemu():
     print("\n-> Installing QEMU")
     packages = ["qemu-system-x86", "ovmf", "libguestfs-tools", "qemu-utils", "guestfs-tools"]
-    
-    # Add the appropriate kernel package for libguestfs
+    apt_install(packages)
+
+    # libguestfs needs a kernel; try to install the distro meta-package,
+    # but don't fail — the running kernel is usually enough.
     kernel_pkg = get_kernel_package()
     if kernel_pkg:
-        packages.append(kernel_pkg)
-    
-    apt_install(packages)
+        r = run(["apt-get", "install", "-y", "--allow-downgrades", kernel_pkg], check=False)
+        if r.returncode != 0:
+            print(f"  ! kernel meta-package '{kernel_pkg}' unavailable — using existing kernel")
+
     # Rebuild libguestfs appliance (required on Debian/Ubuntu).
     run(["update-guestfs-appliance"], check=False)
     print("  + Installed")
