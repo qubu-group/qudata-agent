@@ -63,6 +63,31 @@ def apt_install(pkgs):
     run(["apt-get", "install", "-y", "--allow-downgrades"] + pkgs, env=env)
 
 
+def get_distro_id():
+    """Detect the distribution ID (debian, ubuntu, etc.)."""
+    try:
+        with open("/etc/os-release") as f:
+            for line in f:
+                if line.startswith("ID="):
+                    return line.strip().split("=")[1].strip('"').lower()
+    except FileNotFoundError:
+        pass
+    return "unknown"
+
+
+def get_kernel_package():
+    """Return the appropriate kernel package name for libguestfs."""
+    distro = get_distro_id()
+    if distro == "ubuntu":
+        return "linux-image-generic"
+    elif distro == "debian":
+        return "linux-image-amd64"
+    else:
+        # For other distros, try generic first, fall back to nothing
+        # as kernel should already be installed
+        return None
+
+
 def save_state(state):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, indent=2))
@@ -994,10 +1019,14 @@ def install_base():
 
 def install_qemu():
     print("\n-> Installing QEMU")
-    apt_install(
-        ["qemu-system-x86", "ovmf", "libguestfs-tools", "qemu-utils",
-         "linux-image-amd64", "guestfs-tools"]
-    )
+    packages = ["qemu-system-x86", "ovmf", "libguestfs-tools", "qemu-utils", "guestfs-tools"]
+    
+    # Add the appropriate kernel package for libguestfs
+    kernel_pkg = get_kernel_package()
+    if kernel_pkg:
+        packages.append(kernel_pkg)
+    
+    apt_install(packages)
     # Rebuild libguestfs appliance (required on Debian/Ubuntu).
     run(["update-guestfs-appliance"], check=False)
     print("  + Installed")

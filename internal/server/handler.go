@@ -213,13 +213,17 @@ type sshRequest struct {
 func (h *Handler) AddSSH(c *gin.Context) {
 	var req sshRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		h.logger.Warn("add ssh key: bad request", "err", err)
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
+	h.logger.Info("adding SSH key", "pubkey_prefix", truncate(req.SSHPubkey, 40))
 	if err := h.vm.AddSSHKey(c.Request.Context(), req.SSHPubkey); err != nil {
+		h.logger.Error("add ssh key failed", "err", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
+	h.logger.Info("SSH key added successfully")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -234,4 +238,11 @@ func (h *Handler) RemoveSSH(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }

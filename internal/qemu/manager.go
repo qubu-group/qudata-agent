@@ -2,8 +2,10 @@ package qemu
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net"
 	"os"
 	"os/exec"
@@ -202,9 +204,6 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 
 	m.logger.Info("starting VM", "vm_id", vmID, "gpu", gpuAddr, "cpus", cpus, "mem", mem)
 
-	// Log root password if exists
-	m.logRootPassword()
-
 	cmd := exec.Command(m.qemuBin, args...)
 	if logFile != nil {
 		cmd.Stdout = logFile
@@ -264,6 +263,14 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 
 		m.sshClient = sshClient
 		m.logger.Info("VM SSH ready", "vm_id", vmID)
+
+		// Set root password and log it.
+		rootPass := generatePassword(16)
+		if out, err := sshClient.Run(ctx, fmt.Sprintf("echo 'root:%s' | chpasswd", rootPass)); err != nil {
+			m.logger.Warn("failed to set root password", "err", err, "output", string(out))
+		} else {
+			m.logger.Info("VM root credentials", "username", "root", "password", rootPass)
+		}
 	}
 
 	portMap := make(domain.InstancePorts, len(pool))
@@ -378,12 +385,19 @@ func (m *Manager) AddSSHKey(ctx context.Context, pubkey string) error {
 		return fmt.Errorf("empty SSH public key")
 	}
 	cmd := fmt.Sprintf(
-		`mkdir -p /root/.ssh && echo '%s' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys`,
+		`mkdir -p /root/.ssh && chmod 700 /root/.ssh && echo '%s' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys`,
 		pubkey,
 	)
-	if out, err := m.sshExec(ctx, cmd); err != nil {
+	m.logger.Info("injecting SSH key into VM")
+	out, err := m.sshExec(ctx, cmd)
+	if err != nil {
+		m.logger.Error("SSH key injection failed", "err", err, "output", strings.TrimSpace(string(out)))
 		return fmt.Errorf("add ssh key: %w: %s", err, string(out))
 	}
+
+	// Verify key was added.
+	verifyOut, verifyErr := m.sshExec(ctx, "wc -l /root/.ssh/authorized_keys")
+	m.logger.Info("SSH key injected", "authorized_keys_check", strings.TrimSpace(string(verifyOut)), "verify_err", verifyErr)
 	return nil
 }
 
@@ -562,16 +576,12 @@ func mapQMPStatus(s string) domain.InstanceStatus {
 	}
 }
 
-func (m *Manager) logRootPassword() {
-	// Try to read root password from /var/lib/qudata/root_password.txt
-	passwordFile := "/var/lib/qudata/root_password.txt"
-	data, err := os.ReadFile(passwordFile)
-	if err != nil {
-		m.logger.Debug("root password file not found", "path", passwordFile)
-		return
+func generatePassword(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, length)
+	for i := range b {
+		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		b[i] = charset[n.Int64()]
 	}
-	password := strings.TrimSpace(string(data))
-	if password != "" {
-		m.logger.Info("VM root credentials", "username", "root", "password", password)
-	}
+	return string(b)
 }
