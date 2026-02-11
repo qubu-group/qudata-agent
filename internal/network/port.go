@@ -9,9 +9,9 @@ import (
 
 const (
 	SSHPortMin = 10000
-	SSHPortMax = 15000
+	SSHPortMax = 10010
 	AppPortMin = 15001
-	AppPortMax = 65535
+	AppPortMax = 15100
 )
 
 type PortAllocator struct {
