@@ -62,7 +62,6 @@ type Manager struct {
 	ovmfVarsPath string
 	done         chan struct{}
 	portPool     map[int]int
-	sshReady     chan struct{} // closed when VM SSH is ready after Create
 }
 
 func NewManager(cfg Config, logger *slog.Logger) *Manager {
@@ -232,7 +231,6 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 	m.qmpSocket = qmpSocket
 	m.gpuAddr = gpuAddr
 	m.ovmfVarsPath = ovmfVarsPath
-	m.sshReady = make(chan struct{})
 
 	m.done = make(chan struct{})
 	go func() {
@@ -253,9 +251,6 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 	m.logger.Info("VM started", "vm_id", vmID, "pid", cmd.Process.Pid)
 
 	sshPort, hasSSH := pool[22]
-	if !hasSSH {
-		close(m.sshReady)
-	}
 	if hasSSH {
 		sshClient := NewSSHClient("127.0.0.1", sshPort, m.sshKeyPath)
 
@@ -265,7 +260,6 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 
 		if sshErr != nil {
 			m.logger.Error("VM SSH timeout", "err", sshErr)
-			close(m.sshReady)
 			m.stopLocked(context.Background())
 			return nil, fmt.Errorf("VM SSH not ready: %w", sshErr)
 		}
@@ -301,8 +295,6 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 		if out, err := sshClient.Run(ctx, enablePassAuth); err != nil {
 			m.logger.Warn("failed to enable password auth", "err", err, "output", string(out))
 		}
-
-		close(m.sshReady)
 	}
 
 	portMap := make(domain.InstancePorts, len(pool))
@@ -471,18 +463,24 @@ func parseVMStats(output string) *domain.StatsSnapshot {
 	return snap
 }
 
-func (m *Manager) waitSSHReady(ctx context.Context) error {
-	m.mu.Lock()
-	ch := m.sshReady
-	m.mu.Unlock()
-	if ch == nil {
-		return fmt.Errorf("no VM running")
-	}
-	select {
-	case <-ch:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+// awaitSSH blocks until the VM's SSH client is available (set after WaitForBoot
+// in Create) or the context expires. This is safe across the Create-in-background
+// pattern because it polls the mutex-protected sshClient field.
+func (m *Manager) awaitSSH(ctx context.Context) (*SSHClient, error) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
+		m.mu.Lock()
+		c := m.sshClient
+		m.mu.Unlock()
+		if c != nil {
+			return c, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("VM SSH not ready: %w", ctx.Err())
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -492,28 +490,26 @@ func (m *Manager) AddSSHKey(_ context.Context, pubkey string) error {
 		return fmt.Errorf("empty SSH public key")
 	}
 
-	// Wait for VM SSH to be ready (Create runs in background).
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer waitCancel()
-	if err := m.waitSSHReady(waitCtx); err != nil {
-		return fmt.Errorf("VM not ready: %w", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+
+	ssh, err := m.awaitSSH(ctx)
+	if err != nil {
+		return err
+	}
 
 	cmd := fmt.Sprintf(
 		`mkdir -p /root/.ssh && chmod 700 /root/.ssh && echo '%s' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys`,
 		pubkey,
 	)
 	m.logger.Info("injecting SSH key into VM")
-	out, err := m.sshExec(ctx, cmd)
+	out, err := ssh.Run(ctx, cmd)
 	if err != nil {
 		m.logger.Error("SSH key injection failed", "err", err, "output", strings.TrimSpace(string(out)))
 		return fmt.Errorf("add ssh key: %w: %s", err, string(out))
 	}
 
-	verifyOut, verifyErr := m.sshExec(ctx, "wc -l /root/.ssh/authorized_keys")
+	verifyOut, verifyErr := ssh.Run(ctx, "wc -l /root/.ssh/authorized_keys")
 	m.logger.Info("SSH key injected", "authorized_keys_check", strings.TrimSpace(string(verifyOut)), "verify_err", verifyErr)
 	return nil
 }
@@ -524,18 +520,17 @@ func (m *Manager) RemoveSSHKey(_ context.Context, pubkey string) error {
 		return fmt.Errorf("empty SSH public key")
 	}
 
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer waitCancel()
-	if err := m.waitSSHReady(waitCtx); err != nil {
-		return fmt.Errorf("VM not ready: %w", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+
+	ssh, err := m.awaitSSH(ctx)
+	if err != nil {
+		return err
+	}
 
 	escaped := strings.ReplaceAll(pubkey, "/", `\/`)
 	cmd := fmt.Sprintf(`sed -i '/%s/d' /root/.ssh/authorized_keys`, escaped)
-	if out, err := m.sshExec(ctx, cmd); err != nil {
+	if out, err := ssh.Run(ctx, cmd); err != nil {
 		return fmt.Errorf("remove ssh key: %w: %s", err, string(out))
 	}
 	return nil
@@ -604,25 +599,6 @@ func (m *Manager) waitForQMP(qmp *QMPClient, timeout time.Duration) error {
 	return fmt.Errorf("timeout waiting for QMP socket %s", m.qmpSocket)
 }
 
-func (m *Manager) sshExec(ctx context.Context, command string) ([]byte, error) {
-	sshPort, ok := m.portPool[22]
-	if !ok {
-		return nil, fmt.Errorf("no SSH port forwarding configured")
-	}
-	args := []string{
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", "ConnectTimeout=10",
-		"-o", "BatchMode=yes",
-		"-p", strconv.Itoa(sshPort),
-	}
-	if m.sshKeyPath != "" {
-		args = append(args, "-i", m.sshKeyPath)
-	}
-	args = append(args, "root@127.0.0.1", command)
-	return exec.CommandContext(ctx, "ssh", args...).CombinedOutput()
-}
-
 func (m *Manager) forceKill() {
 	if m.cmd != nil && m.cmd.Process != nil {
 		_ = m.cmd.Process.Kill()
@@ -665,7 +641,6 @@ func (m *Manager) cleanup() {
 	m.gpuAddr = ""
 	m.ovmfVarsPath = ""
 	m.done = nil
-	m.sshReady = nil
 }
 
 func allocatePortPool(guestPorts []int) (map[int]int, error) {
