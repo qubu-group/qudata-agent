@@ -367,19 +367,79 @@ func (m *Manager) Status(ctx context.Context) domain.InstanceStatus {
 	return domain.StatusRunning
 }
 
-// VMID returns the identifier of the currently running VM.
 func (m *Manager) VMID() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.vmID
 }
 
-// HostPortForGuest returns the host port mapped to a guest port, if any.
 func (m *Manager) HostPortForGuest(guestPort int) (int, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	hp, ok := m.portPool[guestPort]
 	return hp, ok
+}
+
+// CollectStats gathers GPU, CPU and RAM metrics from the running VM via SSH.
+func (m *Manager) CollectStats(ctx context.Context) *domain.StatsSnapshot {
+	m.mu.Lock()
+	ssh := m.sshClient
+	m.mu.Unlock()
+
+	if ssh == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	// Single SSH call: GPU (nvidia-smi) + CPU/RAM (from /proc).
+	cmd := `nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null; ` +
+		`echo "---"; ` +
+		`awk '{u=$2+$4; t=$2+$4+$5; if(NR>1) printf "%.1f\n", (u-pu)/(t-pt)*100; pu=u; pt=t}' <(head -1 /proc/stat; sleep 0.3; head -1 /proc/stat); ` +
+		`awk '/MemTotal/{t=$2} /MemAvailable/{a=$2} END{printf "%.1f\n", (t-a)/t*100}' /proc/meminfo`
+
+	out, err := ssh.Run(ctx, cmd)
+	if err != nil {
+		return nil
+	}
+
+	return parseVMStats(string(out))
+}
+
+func parseVMStats(output string) *domain.StatsSnapshot {
+	parts := strings.SplitN(output, "---\n", 2)
+	snap := &domain.StatsSnapshot{}
+
+	// GPU part (before "---")
+	if len(parts) >= 1 {
+		gpuLine := strings.TrimSpace(parts[0])
+		if gpuLine != "" {
+			fields := strings.Split(gpuLine, ",")
+			if len(fields) >= 4 {
+				snap.GPUUtil, _ = strconv.ParseFloat(strings.TrimSpace(fields[0]), 64)
+				snap.GPUTemp, _ = strconv.Atoi(strings.TrimSpace(fields[1]))
+				memUsed, _ := strconv.ParseFloat(strings.TrimSpace(fields[2]), 64)
+				memTotal, _ := strconv.ParseFloat(strings.TrimSpace(fields[3]), 64)
+				if memTotal > 0 {
+					snap.MemUtil = memUsed / memTotal * 100
+				}
+			}
+		}
+	}
+
+	// CPU + RAM part (after "---")
+	if len(parts) >= 2 {
+		lines := strings.Split(strings.TrimSpace(parts[1]), "\n")
+		if len(lines) >= 1 {
+			snap.CPUUtil, _ = strconv.ParseFloat(strings.TrimSpace(lines[0]), 64)
+		}
+		if len(lines) >= 2 {
+			snap.RAMUtil, _ = strconv.ParseFloat(strings.TrimSpace(lines[1]), 64)
+		}
+	}
+
+	return snap
 }
 
 func (m *Manager) AddSSHKey(_ context.Context, pubkey string) error {

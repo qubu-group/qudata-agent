@@ -246,7 +246,12 @@ func (a *Agent) publishStats(ctx context.Context) {
 			if status == domain.StatusDestroyed {
 				continue
 			}
+
 			report := domain.StatsReport{Status: status}
+			if snap := a.mgr.CollectStats(ctx); snap != nil {
+				report.StatsSnapshot = *snap
+			}
+
 			if err := a.api.SendStats(ctx, report); err != nil {
 				if errCount%40 == 0 {
 					a.logger.Warn("failed to send stats", "err", err)
