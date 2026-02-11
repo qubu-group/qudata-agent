@@ -70,8 +70,7 @@ remotePort = {{ .RemotePort }}
 {{- end }}
 `))
 
-// NewConfig builds the FRPC config from hardcoded server params + dynamic agent info.
-func NewConfig(agentID, secretDomain string, agentPort int) *Config {
+func NewConfig(agentID, tunnelToken string, agentPort int) *Config {
 	return &Config{
 		ServerAddr: FRPServerAddr,
 		ServerPort: FRPServerPort,
@@ -81,22 +80,19 @@ func NewConfig(agentID, secretDomain string, agentPort int) *Config {
 			Type:         "http",
 			LocalIP:      "127.0.0.1",
 			LocalPort:    agentPort,
-			CustomDomain: fmt.Sprintf("%s:%d", secretDomain, agentPort),
+			CustomDomain: fmt.Sprintf("%s:%d", tunnelToken, agentPort),
 		},
 	}
 }
 
-// AddInstanceProxy appends a single instance proxy.
 func (c *Config) AddInstanceProxy(p Proxy) {
 	c.InstanceProxies = append(c.InstanceProxies, p)
 }
 
-// ClearInstanceProxies removes all instance proxies.
 func (c *Config) ClearInstanceProxies() {
 	c.InstanceProxies = nil
 }
 
-// Render writes the FRPC TOML config.
 func (c *Config) Render() ([]byte, error) {
 	var buf bytes.Buffer
 	if err := configTemplate.Execute(&buf, c); err != nil {
@@ -105,10 +101,7 @@ func (c *Config) Render() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// BuildInstanceProxies creates FRP proxy entries for a VM instance.
-// SSH: TCP proxy with remotePort from the SSH range (10000-15000).
-// App ports: HTTP proxies with customDomains = ["<tunnel_token>:<remotePort>"].
-func BuildInstanceProxies(secretDomain string, hostPorts []int, sshRemotePort int, sshEnabled bool, ports []PortSpec) []Proxy {
+func BuildInstanceProxies(tunnelToken string, hostPorts []int, sshRemotePort int, sshEnabled bool, ports []PortSpec) []Proxy {
 	var proxies []Proxy
 	idx := 0
 
@@ -123,7 +116,7 @@ func BuildInstanceProxies(secretDomain string, hostPorts []int, sshRemotePort in
 		idx++
 	}
 
-	fullDomain := secretDomain + DomainSuffix
+	fullDomain := tunnelToken + DomainSuffix
 	for _, ps := range ports {
 		if idx >= len(hostPorts) {
 			break
@@ -151,7 +144,6 @@ func BuildInstanceProxies(secretDomain string, hostPorts []int, sshRemotePort in
 	return proxies
 }
 
-// PortSpec describes a single port mapping for proxy building.
 type PortSpec struct {
 	GuestPort  int
 	RemotePort int

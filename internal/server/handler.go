@@ -13,9 +13,6 @@ import (
 	"github.com/qudata/agent/internal/storage"
 )
 
-// TODO: hardcoded ports — replace with dynamic config from API when ready.
-const ollamaGuestPort = 11434
-
 type Handler struct {
 	vm       domain.VMManager
 	frpc     *frpc.Process
@@ -47,11 +44,19 @@ func (h *Handler) Ping(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+type portRequest struct {
+	Name      string `json:"name"`
+	GuestPort int    `json:"guest_port" binding:"required"`
+	Proto     string `json:"proto" binding:"required"`
+}
+
 type createInstanceRequest struct {
-	TunnelToken string `json:"tunnel_token" binding:"required"`
-	DiskSizeGB  int    `json:"disk_size_gb"`
-	CPUs        string `json:"cpus"`
-	Memory      string `json:"memory"`
+	TunnelToken string        `json:"tunnel_token" binding:"required"`
+	SSHEnabled  bool          `json:"ssh_enabled"`
+	Ports       []portRequest `json:"ports"`
+	DiskSizeGB  int           `json:"disk_size_gb"`
+	CPUs        string        `json:"cpus"`
+	Memory      string        `json:"memory"`
 }
 
 func (h *Handler) CreateInstance(c *gin.Context) {
@@ -62,29 +67,26 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 	}
 
 	if h.testMode {
-		h.createInstanceTestMode(c, req)
+		h.createTestInstance(c, req)
 	} else {
-		h.createInstanceFRPC(c, req)
+		h.createFRPCInstance(c, req)
 	}
 }
 
-// createInstanceTestMode — ports open directly on 0.0.0.0, no FRPC.
-func (h *Handler) createInstanceTestMode(c *gin.Context, req createInstanceRequest) {
-	// SSH: host port from SSH range, directly accessible.
+// createTestInstance — hardcoded SSH + Ollama, ports on 0.0.0.0, no FRPC.
+func (h *Handler) createTestInstance(c *gin.Context, req createInstanceRequest) {
 	sshPort, err := h.ports.AllocateSSHPort()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "ssh port: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
 
-	// Ollama: host port from app range, directly accessible.
-	ollamaPorts, err := h.ports.AllocateAppPorts(1)
+	ollamaPort, err := h.ports.AllocateOne()
 	if err != nil {
 		h.ports.Release(sshPort)
-		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "ollama port: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
-	ollamaPort := ollamaPorts[0]
 
 	spec := domain.InstanceSpec{
 		SSHEnabled:  true,
@@ -93,17 +95,14 @@ func (h *Handler) createInstanceTestMode(c *gin.Context, req createInstanceReque
 		CPUs:        req.CPUs,
 		Memory:      req.Memory,
 		Ports: []domain.PortMapping{
-			{Name: "ollama", GuestPort: ollamaGuestPort, RemotePort: ollamaPort, Proto: "http"},
+			{Name: "ollama", GuestPort: 11434, Proto: "http"},
 		},
 	}
-
-	// In test mode hostPorts = external ports (QEMU binds to 0.0.0.0).
 	hostPorts := []int{sshPort, ollamaPort}
 
-	go h.startInstance(context.Background(), spec, hostPorts, sshPort)
+	go h.startVM(context.Background(), spec, hostPorts)
 
-	h.logger.Info("instance created (test mode)", "ssh_port", sshPort, "ollama_port", ollamaPort)
-
+	h.logger.Info("instance created (test)", "ssh", sshPort, "ollama", ollamaPort)
 	c.JSON(http.StatusOK, gin.H{
 		"ok": true,
 		"data": gin.H{
@@ -115,70 +114,105 @@ func (h *Handler) createInstanceTestMode(c *gin.Context, req createInstanceReque
 	})
 }
 
-// createInstanceFRPC — ports proxied via FRPC tunnels.
-func (h *Handler) createInstanceFRPC(c *gin.Context, req createInstanceRequest) {
-	// SSH: FRPC TCP remote port (10000-15000), separate local host port.
-	sshRemotePort, err := h.ports.AllocateSSHPort()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "ssh port: " + err.Error()})
-		return
+// createFRPCInstance — dynamic ports from request, tunneled via FRPC.
+func (h *Handler) createFRPCInstance(c *gin.Context, req createInstanceRequest) {
+	var (
+		hostPorts    []int
+		allocated    []int
+		portMappings []domain.PortMapping
+		sshRemote    int
+	)
+
+	rollback := func() { h.ports.Release(allocated...) }
+
+	if req.SSHEnabled {
+		remote, err := h.ports.AllocateSSHPort()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
+			return
+		}
+		allocated = append(allocated, remote)
+
+		local, err := h.ports.AllocateOne()
+		if err != nil {
+			rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
+			return
+		}
+		allocated = append(allocated, local)
+
+		sshRemote = remote
+		hostPorts = append(hostPorts, local)
 	}
 
-	sshHostPort, err := h.ports.AllocateAppPorts(1)
-	if err != nil {
-		h.ports.Release(sshRemotePort)
-		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "ssh local port: " + err.Error()})
-		return
-	}
+	for _, p := range req.Ports {
+		local, err := h.ports.AllocateOne()
+		if err != nil {
+			rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
+			return
+		}
+		allocated = append(allocated, local)
 
-	// Ollama: local host port + FRPC HTTP remote port.
-	ollamaHostPort, err := h.ports.AllocateAppPorts(1)
-	if err != nil {
-		h.ports.Release(sshRemotePort)
-		h.ports.Release(sshHostPort...)
-		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "ollama port: " + err.Error()})
-		return
-	}
+		remote, err := h.ports.AllocateOne()
+		if err != nil {
+			rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
+			return
+		}
+		allocated = append(allocated, remote)
 
-	ollamaRemotePort, err := h.ports.AllocateAppPorts(1)
-	if err != nil {
-		h.ports.Release(sshRemotePort)
-		h.ports.Release(sshHostPort...)
-		h.ports.Release(ollamaHostPort...)
-		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "ollama remote port: " + err.Error()})
-		return
+		hostPorts = append(hostPorts, local)
+		portMappings = append(portMappings, domain.PortMapping{
+			Name:       p.Name,
+			GuestPort:  p.GuestPort,
+			RemotePort: remote,
+			Proto:      p.Proto,
+		})
 	}
 
 	spec := domain.InstanceSpec{
-		SSHEnabled:  true,
+		SSHEnabled:  req.SSHEnabled,
 		TunnelToken: req.TunnelToken,
 		DiskSizeGB:  req.DiskSizeGB,
 		CPUs:        req.CPUs,
 		Memory:      req.Memory,
-		Ports: []domain.PortMapping{
-			{Name: "ollama", GuestPort: ollamaGuestPort, RemotePort: ollamaRemotePort[0], Proto: "http"},
-		},
+		Ports:       portMappings,
 	}
 
-	hostPorts := []int{sshHostPort[0], ollamaHostPort[0]}
+	go h.startVMWithFRPC(context.Background(), spec, hostPorts, sshRemote)
 
-	go h.startInstance(context.Background(), spec, hostPorts, sshRemotePort)
+	// Build response: guest_port → remote_port (what clients connect to via FRPC).
+	ports := make(gin.H, len(portMappings)+1)
+	if req.SSHEnabled {
+		ports["22"] = strconv.Itoa(sshRemote)
+	}
+	for _, pm := range portMappings {
+		ports[strconv.Itoa(pm.GuestPort)] = strconv.Itoa(pm.RemotePort)
+	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"ok": true,
-		"data": gin.H{
-			"ports": gin.H{
-				"22":    strconv.Itoa(sshRemotePort),
-				"11434": strconv.Itoa(ollamaRemotePort[0]),
-			},
-		},
-	})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "data": gin.H{"ports": ports}})
 }
 
-func (h *Handler) startInstance(ctx context.Context, spec domain.InstanceSpec, hostPorts []int, sshRemotePort int) {
+// ---------------------------------------------------------------------------
+// VM lifecycle (background)
+// ---------------------------------------------------------------------------
+
+func (h *Handler) startVM(ctx context.Context, spec domain.InstanceSpec, hostPorts []int) {
 	portMap, err := h.vm.Create(ctx, spec, hostPorts)
 	if err != nil {
-		h.logger.Error("failed to create instance", "err", err)
+		h.logger.Error("instance creation failed", "err", err)
+		return
+	}
+
+	h.saveState(spec, portMap)
+	h.logger.Info("instance running", "vm_id", h.vm.VMID(), "ports", portMap)
+}
+
+func (h *Handler) startVMWithFRPC(ctx context.Context, spec domain.InstanceSpec, hostPorts []int, sshRemote int) {
+	portMap, err := h.vm.Create(ctx, spec, hostPorts)
+	if err != nil {
+		h.logger.Error("instance creation failed", "err", err)
 		return
 	}
 
@@ -191,11 +225,16 @@ func (h *Handler) startInstance(ctx context.Context, spec domain.InstanceSpec, h
 		})
 	}
 
-	proxies := frpc.BuildInstanceProxies(spec.TunnelToken, hostPorts, sshRemotePort, spec.SSHEnabled, portSpecs)
+	proxies := frpc.BuildInstanceProxies(spec.TunnelToken, hostPorts, sshRemote, spec.SSHEnabled, portSpecs)
 	if err := h.frpc.UpdateInstanceProxies(proxies); err != nil {
-		h.logger.Error("failed to update frpc proxies", "err", err)
+		h.logger.Error("frpc proxy update failed", "err", err)
 	}
 
+	h.saveState(spec, portMap)
+	h.logger.Info("instance running", "vm_id", h.vm.VMID(), "ports", portMap)
+}
+
+func (h *Handler) saveState(spec domain.InstanceSpec, portMap domain.InstancePorts) {
 	state := &domain.InstanceState{
 		VMID:        h.vm.VMID(),
 		Ports:       portMap,
@@ -206,9 +245,11 @@ func (h *Handler) startInstance(ctx context.Context, spec domain.InstanceSpec, h
 	if err := h.store.SaveInstanceState(state); err != nil {
 		h.logger.Error("failed to save instance state", "err", err)
 	}
-
-	h.logger.Info("instance created", "vm_id", h.vm.VMID(), "ports", portMap)
 }
+
+// ---------------------------------------------------------------------------
+// Instance management
+// ---------------------------------------------------------------------------
 
 func (h *Handler) GetInstance(c *gin.Context) {
 	status := h.vm.Status(c.Request.Context())
@@ -246,9 +287,7 @@ func (h *Handler) ManageInstance(c *gin.Context) {
 }
 
 func (h *Handler) DeleteInstance(c *gin.Context) {
-	ctx := c.Request.Context()
-
-	if err := h.vm.Stop(ctx); err != nil {
+	if err := h.vm.Stop(c.Request.Context()); err != nil {
 		h.logger.Error("failed to stop instance", "err", err)
 	}
 
@@ -263,6 +302,10 @@ func (h *Handler) DeleteInstance(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+// ---------------------------------------------------------------------------
+// SSH key management
+// ---------------------------------------------------------------------------
+
 type sshRequest struct {
 	SSHPubkey string `json:"ssh_pubkey" binding:"required"`
 }
@@ -270,17 +313,14 @@ type sshRequest struct {
 func (h *Handler) AddSSH(c *gin.Context) {
 	var req sshRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		h.logger.Warn("add ssh key: bad request", "err", err)
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
-	h.logger.Info("adding SSH key", "pubkey_prefix", truncate(req.SSHPubkey, 40))
 	if err := h.vm.AddSSHKey(c.Request.Context(), req.SSHPubkey); err != nil {
 		h.logger.Error("add ssh key failed", "err", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
-	h.logger.Info("SSH key added successfully")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -295,11 +335,4 @@ func (h *Handler) RemoveSSH(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
-}
-
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
 }

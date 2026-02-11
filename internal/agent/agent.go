@@ -233,7 +233,7 @@ func (a *Agent) bootstrap(ctx context.Context) (*domain.AgentMetadata, error) {
 }
 
 func (a *Agent) publishStats(ctx context.Context) {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(1500 * time.Millisecond)
 	defer ticker.Stop()
 
 	errCount := 0

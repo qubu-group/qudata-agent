@@ -502,12 +502,19 @@ def prepare_base_image():
         "> /etc/systemd/system/systemd-networkd-wait-online.service.d/any.conf; "
         "true",
 
-        # SSH: allow root login (key + password), agent sets password per-VM
+        # SSH: allow root login, disable locale forwarding (prevents LC_CTYPE warnings)
         "--run-command",
         "sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config; "
         "sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config; "
         "sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config; "
+        "sed -i 's/^AcceptEnv.*/#AcceptEnv/' /etc/ssh/sshd_config; "
         "systemctl enable ssh 2>/dev/null; systemctl enable sshd 2>/dev/null; true",
+
+        # Set sane default locale
+        "--run-command",
+        "echo 'LANG=en_US.UTF-8' > /etc/default/locale; "
+        "echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen; "
+        "locale-gen en_US.UTF-8 2>/dev/null; true",
 
         # Disable cloud-init
         "--run-command",
@@ -521,9 +528,8 @@ def prepare_base_image():
         "docker.socket containerd.service 2>/dev/null; "
         "systemctl mask snapd.service snapd.socket 2>/dev/null; true",
 
-        # Fix locale warnings
+        # Suppress cloud-init locale check
         "--run-command",
-        "apt-get install -y locales-all 2>/dev/null; "
         "touch /var/lib/cloud/instance/locale-check.skip; true",
     ])
 

@@ -35,7 +35,7 @@ func NewProcess(binaryPath, configPath string, logger *slog.Logger) *Process {
 	}
 }
 
-func (p *Process) Start(agentID, secretDomain string, agentPort int) error {
+func (p *Process) Start(agentID, tunnelToken string, agentPort int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -44,7 +44,7 @@ func (p *Process) Start(agentID, secretDomain string, agentPort int) error {
 	}
 
 	p.stopCtx, p.stopCancel = context.WithCancel(context.Background())
-	p.config = NewConfig(agentID, secretDomain, agentPort)
+	p.config = NewConfig(agentID, tunnelToken, agentPort)
 
 	if err := p.writeConfig(); err != nil {
 		return err
