@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -60,11 +62,31 @@ type createInstanceRequest struct {
 }
 
 func (h *Handler) CreateInstance(c *gin.Context) {
+	// Read raw body for logging
+	bodyBytes, _ := io.ReadAll(c.Request.Body)
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+	h.logger.Info("CreateInstance request",
+		"body", string(bodyBytes),
+		"content_type", c.ContentType(),
+	)
+
 	var req createInstanceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		h.logger.Error("CreateInstance bind error",
+			"error", err.Error(),
+			"body", string(bodyBytes),
+		)
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
+
+	h.logger.Info("CreateInstance parsed",
+		"tunnel_token", req.TunnelToken,
+		"ssh_enabled", req.SSHEnabled,
+		"ports", len(req.Ports),
+		"test_mode", h.testMode,
+	)
 
 	if h.testMode {
 		h.createTestInstance(c, req)
