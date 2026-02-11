@@ -80,7 +80,7 @@ func NewConfig(agentID, tunnelToken string, agentPort int) *Config {
 			Type:         "http",
 			LocalIP:      "127.0.0.1",
 			LocalPort:    agentPort,
-			CustomDomain: fmt.Sprintf("%s:%d", tunnelToken, agentPort),
+			CustomDomain: fmt.Sprintf("%s-%d", tunnelToken, agentPort),
 		},
 	}
 }
@@ -132,7 +132,7 @@ func BuildInstanceProxies(tunnelToken string, hostPorts []int, sshRemotePort int
 			proxy.RemotePort = ps.RemotePort
 		case "http":
 			if ps.RemotePort > 0 {
-				proxy.CustomDomain = fmt.Sprintf("%s:%d", fullDomain, ps.RemotePort)
+				proxy.CustomDomain = fmt.Sprintf("%s-%d", fullDomain, ps.RemotePort)
 			} else {
 				proxy.CustomDomain = fullDomain
 			}
