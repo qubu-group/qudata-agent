@@ -51,7 +51,7 @@ type portRequest struct {
 }
 
 type createInstanceRequest struct {
-	TunnelToken string        `json:"tunnel_token" binding:"required"`
+	TunnelToken string        `json:"tunnel_token"` // required only in non-test mode
 	SSHEnabled  bool          `json:"ssh_enabled"`
 	Ports       []portRequest `json:"ports"`
 	DiskSizeGB  int           `json:"disk_size_gb"`
@@ -116,6 +116,11 @@ func (h *Handler) createTestInstance(c *gin.Context, req createInstanceRequest) 
 
 // createFRPCInstance — dynamic ports from request, tunneled via FRPC.
 func (h *Handler) createFRPCInstance(c *gin.Context, req createInstanceRequest) {
+	if req.TunnelToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "tunnel_token is required"})
+		return
+	}
+
 	var (
 		hostPorts    []int
 		allocated    []int
