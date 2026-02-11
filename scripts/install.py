@@ -4,12 +4,9 @@
 import argparse
 import json
 import os
-import random
 import re
-import secrets
 import select
 import shutil
-import string
 import subprocess
 import sys
 import textwrap
@@ -28,7 +25,9 @@ FRPC_DIR = Path("/etc/qudata")
 FRPC_BINARY = Path("/usr/local/bin/frpc")
 RUN_DIR = Path("/var/run/qudata")
 SYSTEMD_UNIT = Path(f"/etc/systemd/system/{AGENT_NAME}.service")
+CONTINUE_UNIT = Path("/etc/systemd/system/qudata-install-continue.service")
 STATE_FILE = DATA_DIR / "install_state.json"
+GPU_INFO_PATH = DATA_DIR / "gpu-info.json"
 
 REPO_URL = os.environ.get(
     "REPO_URL", "https://github.com/qubu-group/qudata-agent.git"
@@ -40,7 +39,6 @@ UBUNTU_CLOUD_IMAGE = (
     "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
 )
 BASE_IMAGE_PATH = IMAGE_DIR / "qudata-base.qcow2"
-ROOT_PASSWORD_FILE = DATA_DIR / "root_password.txt"
 
 
 # libguestfs: use direct backend (no libvirt dependency).
@@ -97,27 +95,6 @@ def load_state():
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text())
     return {}
-
-
-def generate_root_password():
-    """Generate a secure random password for root user."""
-    # Generate 16-character password with letters, digits, and some special chars
-    alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
-    password = ''.join(secrets.choice(alphabet) for _ in range(16))
-    
-    # Save to file
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    ROOT_PASSWORD_FILE.write_text(password)
-    ROOT_PASSWORD_FILE.chmod(0o600)
-    
-    return password
-
-
-def get_or_generate_root_password():
-    """Get existing root password or generate a new one."""
-    if ROOT_PASSWORD_FILE.exists():
-        return ROOT_PASSWORD_FILE.read_text().strip()
-    return generate_root_password()
 
 
 # ---------------------------------------------------------------------------
@@ -494,76 +471,50 @@ def stop_running_agent():
 
 
 def prepare_base_image():
-    """Inject SSH key, fix networking, SSH config, disable cloud-init."""
-    priv_key = SSH_DIR / "management_key"
-    pub_key = SSH_DIR / "management_key.pub"
-
-    if not priv_key.exists():
+    """Inject management SSH key, fix networking, harden SSH, disable cloud-init."""
+    if not (SSH_DIR / "management_key").exists():
         generate_ssh_key()
 
-    pub_key_content = pub_key.read_text().strip()
-    
-    # Generate or get root password
-    root_password = get_or_generate_root_password()
-    
+    pub_key_content = (SSH_DIR / "management_key.pub").read_text().strip()
     print("  + Configuring base image")
-    print(f"  + Root password: {root_password}")
-    print(f"  + Password saved to: {ROOT_PASSWORD_FILE}")
-    
-    # Generate password hash for chpasswd
-    # Using openssl to generate SHA-512 hash
-    hash_cmd = ["openssl", "passwd", "-6", root_password]
-    hash_result = run(hash_cmd, check=True)
-    password_hash = hash_result.stdout.strip()
 
     run([
         "virt-customize", "-a", str(BASE_IMAGE_PATH),
 
-        # ---- SSH key ----
+        # SSH key
         "--mkdir", "/root/.ssh",
         "--chmod", "0700:/root/.ssh",
         "--write", f"/root/.ssh/authorized_keys:{pub_key_content}",
         "--chmod", "0600:/root/.ssh/authorized_keys",
 
-        # ---- Set root password ----
+        # Network: clean old configs, force systemd-networkd with wildcard DHCP
         "--run-command",
-        f"echo 'root:{password_hash}' | chpasswd -e",
-
-        # ---- Network: nuke old configs, force systemd-networkd ----
-        "--run-command",
-        # Remove ALL conflicting network configs
-        "rm -f /etc/network/interfaces.d/* "
-        "/etc/netplan/*.yaml "
-        "/etc/systemd/network/[0-8]*.network "
-        "2>/dev/null; "
-        # Interfaces: only loopback (disable ifupdown for real interfaces)
+        "rm -f /etc/network/interfaces.d/* /etc/netplan/*.yaml "
+        "/etc/systemd/network/[0-8]*.network 2>/dev/null; "
         "printf 'auto lo\\niface lo inet loopback\\n' > /etc/network/interfaces; "
-        # Wildcard DHCP for any en* interface via systemd-networkd
         "mkdir -p /etc/systemd/network && "
         "printf '[Match]\\nName=en*\\n\\n[Network]\\nDHCP=yes\\n' "
         "> /etc/systemd/network/99-dhcp-all.network; "
-        # Enable networkd, disable ifupdown
         "systemctl enable systemd-networkd 2>/dev/null; "
         "systemctl disable networking 2>/dev/null; "
-        # Fast wait-online: any interface, 10s timeout
         "mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d && "
         "printf '[Service]\\nExecStart=\\nExecStart=/lib/systemd/systemd-networkd-wait-online --any --timeout=10\\n' "
         "> /etc/systemd/system/systemd-networkd-wait-online.service.d/any.conf; "
         "true",
 
-        # ---- SSH server config: allow both key and password auth ----
+        # SSH: allow root login (key + password), agent sets password per-VM
         "--run-command",
         "sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config; "
         "sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config; "
         "sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config; "
         "systemctl enable ssh 2>/dev/null; systemctl enable sshd 2>/dev/null; true",
 
-        # ---- Disable cloud-init ----
+        # Disable cloud-init
         "--run-command",
         "systemctl disable cloud-init cloud-init-local cloud-config cloud-final 2>/dev/null; "
         "touch /etc/cloud/cloud-init.disabled; true",
 
-        # ---- Disable noisy services for faster boot ----
+        # Disable noisy services for faster boot
         "--run-command",
         "systemctl disable apt-daily.timer apt-daily-upgrade.timer man-db.timer "
         "fstrim.timer e2scrub_all.timer unattended-upgrades.service docker.service "
@@ -629,9 +580,6 @@ def _ssh_cmd(port, key_path, remote_cmd):
     ]
 
 
-GPU_INFO_PATH = DATA_DIR / "gpu-info.json"
-
-
 def _save_gpu_info(ssh_port, ssh_key):
     """Query full GPU info from VM and save to JSON for agent use."""
     try:
@@ -662,8 +610,7 @@ def _save_gpu_info(ssh_port, ssh_key):
         if r2.returncode == 0:
             for line in r2.stdout.splitlines():
                 if "CUDA Version" in line:
-                    import re as _re
-                    m = _re.search(r"CUDA Version:\s*([0-9.]+)", line)
+                    m = re.search(r"CUDA Version:\s*([0-9.]+)", line)
                     if m:
                         cuda_ver = float(m.group(1))
                     break
@@ -1030,8 +977,9 @@ def install_qemu():
         if r.returncode != 0:
             print(f"  ! kernel meta-package '{kernel_pkg}' unavailable — using existing kernel")
 
-    # Rebuild libguestfs appliance (required on Debian/Ubuntu).
-    run(["update-guestfs-appliance"], check=False)
+    # Rebuild libguestfs appliance if the tool exists.
+    if shutil.which("update-guestfs-appliance"):
+        run(["update-guestfs-appliance"], check=False)
     print("  + Installed")
 
 
@@ -1235,9 +1183,7 @@ def phase1(args):
         """
         )
 
-        Path("/etc/systemd/system/qudata-install-continue.service").write_text(
-            continue_unit
-        )
+        CONTINUE_UNIT.write_text(continue_unit)
         run(["systemctl", "daemon-reload"])
         run(["systemctl", "enable", "qudata-install-continue.service"])
 
@@ -1260,12 +1206,8 @@ def phase2_continue(api_key, gpus, service_url, test_mode=False):
     print("  QuData Agent Installer — Phase 2")
     print("=" * 50)
 
-    run(
-        ["systemctl", "disable", "qudata-install-continue.service"], check=False
-    )
-    Path("/etc/systemd/system/qudata-install-continue.service").unlink(
-        missing_ok=True
-    )
+    run(["systemctl", "disable", "qudata-install-continue.service"], check=False)
+    CONTINUE_UNIT.unlink(missing_ok=True)
 
     if not check_iommu_enabled():
         sys.exit("IOMMU still not enabled after reboot.")
@@ -1290,13 +1232,6 @@ def print_success():
     print("\n" + "=" * 50)
     print("  Installation complete!")
     print("=" * 50)
-    
-    # Display root password if exists
-    if ROOT_PASSWORD_FILE.exists():
-        root_password = ROOT_PASSWORD_FILE.read_text().strip()
-        print(f"\n  Root password: {root_password}")
-        print(f"  Password file: {ROOT_PASSWORD_FILE}")
-    
     print(f"\n  Status:  systemctl status {AGENT_NAME}")
     print(f"  Logs:    journalctl -u {AGENT_NAME} -f\n")
 

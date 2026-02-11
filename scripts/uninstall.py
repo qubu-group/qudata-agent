@@ -5,7 +5,7 @@ Stops the agent, kills VMs, unbinds GPUs from VFIO, removes all files.
 Works independently of the directory it is run from.
 
 Usage:
-    sudo python3 uninstall.py [--purge] [--keep-data]
+    sudo python3 uninstall.py [--purge] [--keep-data] [-y]
 """
 
 import argparse
@@ -14,6 +14,10 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Paths (must stay in sync with install.py)
+# ---------------------------------------------------------------------------
 
 AGENT_NAME = "qudata-agent"
 BINARY_PATH = Path("/usr/local/bin") / AGENT_NAME
@@ -27,7 +31,7 @@ SYSTEMD_UNIT = Path(f"/etc/systemd/system/{AGENT_NAME}.service")
 CONTINUE_UNIT = Path("/etc/systemd/system/qudata-install-continue.service")
 
 
-def run(cmd, check=False):
+def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True, check=False)
 
 
@@ -42,6 +46,10 @@ def remove_path(path, label):
         print(f"  - {label} not found (skipped)")
 
 
+# ---------------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------------
+
 def stop_service():
     print("\n-> Stopping agent service")
     r = run(["systemctl", "is-active", "--quiet", AGENT_NAME])
@@ -55,14 +63,10 @@ def stop_service():
 
 def kill_vms():
     print("\n-> Killing QEMU VMs")
-    r = run(["pgrep", "-f", "qemu-system.*qudata"])
+    r = run(["pgrep", "-f", "qemu-system"])
     if r.returncode == 0 and r.stdout.strip():
-        pids = r.stdout.strip().split("\n")
-        for pid in pids:
-            pid = pid.strip()
-            if pid:
-                run(["kill", "-9", pid])
-        print(f"  + Killed {len(pids)} VM process(es)")
+        run(["pkill", "-9", "-f", "qemu-system"])
+        print("  + Killed QEMU processes")
     else:
         print("  - No QEMU processes found")
 
@@ -76,30 +80,24 @@ def unbind_vfio_gpus():
 
     count = 0
     for entry in vfio_dir.iterdir():
-        if not entry.is_symlink():
-            continue
-        name = entry.name
-        if not name.startswith("0000:"):
+        if not entry.is_symlink() or not entry.name.startswith("0000:"):
             continue
 
-        addr = name
+        addr = entry.name
         device_dir = Path(f"/sys/bus/pci/devices/{addr}")
 
-        unbind_path = vfio_dir / "unbind"
         try:
-            unbind_path.write_text(addr)
+            (vfio_dir / "unbind").write_text(addr)
         except OSError:
             continue
 
-        override_path = device_dir / "driver_override"
         try:
-            override_path.write_text("\n")
+            (device_dir / "driver_override").write_text("\n")
         except OSError:
             pass
 
-        probe_path = Path("/sys/bus/pci/drivers_probe")
         try:
-            probe_path.write_text(addr)
+            Path("/sys/bus/pci/drivers_probe").write_text(addr)
         except OSError:
             pass
 
@@ -120,12 +118,12 @@ def stop_frpc():
         print("  - No FRPC processes found")
 
 
-def clean_qmp_sockets():
+def clean_runtime():
+    """Remove QMP sockets, logs, and other runtime files."""
     if RUN_DIR.exists():
-        for f in RUN_DIR.glob("*.qmp"):
-            f.unlink(missing_ok=True)
-        for f in RUN_DIR.glob("*.log"):
-            f.unlink(missing_ok=True)
+        for pattern in ("*.qmp", "*.log", "*.fd"):
+            for f in RUN_DIR.glob(pattern):
+                f.unlink(missing_ok=True)
 
 
 def remove_agent_files(keep_data):
@@ -155,14 +153,15 @@ def reload_systemd():
     print("  + Systemd reloaded")
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 def main():
     parser = argparse.ArgumentParser(description="Uninstall QuData Agent")
-    parser.add_argument(
-        "--purge", action="store_true", help="Also remove FRPC binary"
-    )
-    parser.add_argument(
-        "--keep-data", action="store_true", help="Keep /var/lib/qudata"
-    )
+    parser.add_argument("--purge", action="store_true", help="Also remove FRPC binary")
+    parser.add_argument("--keep-data", action="store_true", help="Keep /var/lib/qudata")
+    parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
     args = parser.parse_args()
 
     if os.geteuid() != 0:
@@ -175,21 +174,22 @@ def main():
     if args.purge:
         print("\n  PURGE mode: will also remove FRPC binary")
 
-    try:
-        answer = input("\n  Proceed? [y/N] ").strip().lower()
-        if answer not in ("y", "yes"):
-            print("  Aborted.")
+    if not args.yes:
+        try:
+            answer = input("\n  Proceed? [y/N] ").strip().lower()
+            if answer not in ("y", "yes"):
+                print("  Aborted.")
+                sys.exit(0)
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Aborted.")
             sys.exit(0)
-    except (EOFError, KeyboardInterrupt):
-        print("\n  Aborted.")
-        sys.exit(0)
 
     try:
         stop_service()
         kill_vms()
         unbind_vfio_gpus()
         stop_frpc()
-        clean_qmp_sockets()
+        clean_runtime()
         remove_agent_files(args.keep_data)
 
         if args.purge:
