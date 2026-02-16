@@ -343,6 +343,8 @@ func (h *Handler) ManageInstance(c *gin.Context) {
 func (h *Handler) DeleteInstance(c *gin.Context) {
 	state, _ := h.store.LoadInstanceState()
 
+	h.vm.Invalidate()
+
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 
 	go h.destroyInstance(state)

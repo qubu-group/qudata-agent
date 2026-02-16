@@ -13,4 +13,6 @@ type VMManager interface {
 	RemoveSSHKey(ctx context.Context, pubkey string) error
 	// MarkFailed signals that instance creation failed so that Status returns StatusError.
 	MarkFailed()
+	// Invalidate clears cached SSH client so that awaitSSH waits for a fresh one.
+	Invalidate()
 }

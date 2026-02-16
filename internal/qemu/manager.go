@@ -260,6 +260,11 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 		sshErr := sshClient.WaitForBoot(ctx, 180*time.Second)
 		m.mu.Lock()
 
+		// VM could have been destroyed by Stop() while we waited.
+		if m.vmID == "" {
+			return nil, fmt.Errorf("VM destroyed while waiting for SSH")
+		}
+
 		if sshErr != nil {
 			m.logger.Error("VM SSH timeout", "err", sshErr)
 			m.stopLocked(context.Background())
@@ -369,6 +374,14 @@ func (m *Manager) MarkFailed() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.failed = true
+}
+
+// Invalidate clears the cached SSH client immediately so that subsequent
+// awaitSSH calls block until a fresh client is set by the next Create.
+func (m *Manager) Invalidate() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sshClient = nil
 }
 
 // Status returns the current lifecycle status of the VM.
