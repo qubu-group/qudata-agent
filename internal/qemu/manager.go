@@ -61,6 +61,7 @@ type Manager struct {
 	ovmfVarsPath string
 	done         chan struct{}
 	portPool     map[int]int
+	failed       bool
 }
 
 func NewManager(cfg Config, logger *slog.Logger) *Manager {
@@ -123,6 +124,8 @@ func (m *Manager) KillOrphans() {
 func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPorts []int) (domain.InstancePorts, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	m.failed = false
 
 	if m.vmID != "" {
 		return nil, domain.ErrInstanceAlreadyRunning{}
@@ -360,12 +363,23 @@ func (m *Manager) Manage(ctx context.Context, cmd domain.InstanceCommand) error 
 	}
 }
 
+// MarkFailed sets the manager into a failed state so that Status returns StatusError.
+// This is used when instance creation fails before the VM process starts.
+func (m *Manager) MarkFailed() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failed = true
+}
+
 // Status returns the current lifecycle status of the VM.
 func (m *Manager) Status(ctx context.Context) domain.InstanceStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.vmID == "" {
+		if m.failed {
+			return domain.StatusError
+		}
 		return domain.StatusDestroyed
 	}
 
@@ -543,8 +557,8 @@ func (m *Manager) prepareDisk(vmID string, sizeGB int) (string, error) {
 		}
 		if sizeGB > 0 {
 			if err := m.images.ResizeDisk(path, sizeGB); err != nil {
-				_ = m.images.RemoveDisk(path)
-				return "", err
+				m.logger.Warn("disk resize skipped, using base image size",
+					"requested_gb", sizeGB, "err", err)
 			}
 		}
 		return path, nil

@@ -253,6 +253,7 @@ func (h *Handler) startVM(ctx context.Context, spec domain.InstanceSpec, hostPor
 	portMap, err := h.vm.Create(ctx, spec, hostPorts)
 	if err != nil {
 		h.logger.Error("instance creation failed", "err", err)
+		h.vm.MarkFailed()
 		return
 	}
 
@@ -264,6 +265,7 @@ func (h *Handler) startVMWithFRPC(ctx context.Context, spec domain.InstanceSpec,
 	portMap, err := h.vm.Create(ctx, spec, hostPorts)
 	if err != nil {
 		h.logger.Error("instance creation failed", "err", err)
+		h.vm.MarkFailed()
 		return
 	}
 

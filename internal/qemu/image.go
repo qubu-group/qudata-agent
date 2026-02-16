@@ -1,6 +1,7 @@
 package qemu
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -43,12 +44,41 @@ func (m *ImageManager) CreateOverlay(name, basePath string) (string, error) {
 	return path, nil
 }
 
+// ResizeDisk grows the disk to the requested size. If the disk is already
+// equal or larger, the call is a no-op (we never shrink).
 func (m *ImageManager) ResizeDisk(path string, sizeGB int) error {
+	currentBytes, err := m.virtualSize(path)
+	if err != nil {
+		return fmt.Errorf("qemu-img resize: query size: %w", err)
+	}
+
+	targetBytes := int64(sizeGB) * 1024 * 1024 * 1024
+	if targetBytes <= currentBytes {
+		return nil
+	}
+
 	cmd := exec.Command("qemu-img", "resize", path, fmt.Sprintf("%dG", sizeGB))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("qemu-img resize: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// virtualSize returns the virtual disk size in bytes via qemu-img info.
+func (m *ImageManager) virtualSize(path string) (int64, error) {
+	cmd := exec.Command("qemu-img", "info", "--output=json", path)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("qemu-img info: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	var info struct {
+		VirtualSize int64 `json:"virtual-size"`
+	}
+	if err := json.Unmarshal(out, &info); err != nil {
+		return 0, fmt.Errorf("parse qemu-img info: %w", err)
+	}
+	return info.VirtualSize, nil
 }
 
 func (m *ImageManager) RemoveDisk(path string) error {

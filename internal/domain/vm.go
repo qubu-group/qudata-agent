@@ -11,4 +11,6 @@ type VMManager interface {
 	VMID() string
 	AddSSHKey(ctx context.Context, pubkey string) error
 	RemoveSSHKey(ctx context.Context, pubkey string) error
+	// MarkFailed signals that instance creation failed so that Status returns StatusError.
+	MarkFailed()
 }
