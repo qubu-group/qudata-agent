@@ -43,6 +43,14 @@ func (m *ImageManager) CreateOverlay(name, basePath string) (string, error) {
 	return path, nil
 }
 
+func (m *ImageManager) ResizeDisk(path string, sizeGB int) error {
+	cmd := exec.Command("qemu-img", "resize", path, fmt.Sprintf("%dG", sizeGB))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("qemu-img resize: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func (m *ImageManager) RemoveDisk(path string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove disk %s: %w", path, err)

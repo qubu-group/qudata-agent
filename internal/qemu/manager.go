@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -157,7 +156,7 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 
 	vmID := "vm-" + uuid.New().String()[:8]
 
-	diskPath, err := m.prepareDisk(vmID)
+	diskPath, err := m.prepareDisk(vmID, diskGB)
 	if err != nil {
 		_ = vfio.Unbind()
 		return nil, domain.ErrQEMU{Op: "disk", Err: err}
@@ -536,11 +535,24 @@ func (m *Manager) RemoveSSHKey(_ context.Context, pubkey string) error {
 	return nil
 }
 
-func (m *Manager) prepareDisk(vmID string) (string, error) {
+func (m *Manager) prepareDisk(vmID string, sizeGB int) (string, error) {
 	if m.baseImage != "" {
-		return m.images.CreateOverlay(vmID, m.baseImage)
+		path, err := m.images.CreateOverlay(vmID, m.baseImage)
+		if err != nil {
+			return "", err
+		}
+		if sizeGB > 0 {
+			if err := m.images.ResizeDisk(path, sizeGB); err != nil {
+				_ = m.images.RemoveDisk(path)
+				return "", err
+			}
+		}
+		return path, nil
 	}
-	return m.images.CreateDisk(vmID, m.diskSizeGB)
+	if sizeGB == 0 {
+		sizeGB = m.diskSizeGB
+	}
+	return m.images.CreateDisk(vmID, sizeGB)
 }
 
 func (m *Manager) buildVMArgs(diskPath, gpuAddr, qmpSocket string, net *NetworkConfig, cpus, mem, ovmfVarsPath string) []string {
@@ -641,27 +653,6 @@ func (m *Manager) cleanup() {
 	m.gpuAddr = ""
 	m.ovmfVarsPath = ""
 	m.done = nil
-}
-
-func allocatePortPool(guestPorts []int) (map[int]int, error) {
-	pool := make(map[int]int, len(guestPorts))
-	for _, gp := range guestPorts {
-		hp, err := findFreePort()
-		if err != nil {
-			return nil, fmt.Errorf("allocate host port for guest %d: %w", gp, err)
-		}
-		pool[gp] = hp
-	}
-	return pool, nil
-}
-
-func findFreePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
 func mapQMPStatus(s string) domain.InstanceStatus {

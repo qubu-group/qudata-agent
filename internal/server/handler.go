@@ -123,7 +123,8 @@ func (h *Handler) createTestInstance(c *gin.Context, req createInstanceRequest) 
 	}
 	hostPorts := []int{sshPort, ollamaPort}
 
-	go h.startVM(context.Background(), spec, hostPorts)
+	allocated := []int{sshPort, ollamaPort}
+	go h.startVM(context.Background(), spec, hostPorts, allocated)
 
 	h.logger.Info("instance creating (test)", "ssh", sshPort, "ollama", ollamaPort)
 	c.JSON(http.StatusOK, gin.H{
@@ -174,7 +175,6 @@ func (h *Handler) createFRPCInstance(c *gin.Context, req createInstanceRequest) 
 	}
 
 	for _, portStr := range req.Ports {
-		// Skip SSH port if ssh_enabled (handled separately above)
 		if portStr == "22" && req.SSHEnabled {
 			continue
 		}
@@ -194,7 +194,18 @@ func (h *Handler) createFRPCInstance(c *gin.Context, req createInstanceRequest) 
 		}
 		allocated = append(allocated, local)
 
-		remote, err := h.ports.AllocateOne()
+		// Auto-detect: port 22 = TCP (unique remote port), everything else = HTTP (vhost routing).
+		proto := "http"
+		if guestPort == 22 {
+			proto = "tcp"
+		}
+
+		var remote int
+		if proto == "tcp" {
+			remote, err = h.ports.AllocateSSHPort()
+		} else {
+			remote, err = h.ports.AllocateOne()
+		}
 		if err != nil {
 			rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
@@ -207,7 +218,7 @@ func (h *Handler) createFRPCInstance(c *gin.Context, req createInstanceRequest) 
 			Name:       "port-" + portStr,
 			GuestPort:  guestPort,
 			RemotePort: remote,
-			Proto:      "tcp",
+			Proto:      proto,
 		})
 	}
 
@@ -220,7 +231,7 @@ func (h *Handler) createFRPCInstance(c *gin.Context, req createInstanceRequest) 
 		Ports:       portMappings,
 	}
 
-	go h.startVMWithFRPC(context.Background(), spec, hostPorts, sshRemote)
+	go h.startVMWithFRPC(context.Background(), spec, hostPorts, sshRemote, allocated)
 
 	// Build response: guest_port → remote_port (what clients connect to via FRPC).
 	ports := make(gin.H, len(portMappings)+1)
@@ -238,18 +249,18 @@ func (h *Handler) createFRPCInstance(c *gin.Context, req createInstanceRequest) 
 // VM lifecycle (background)
 // ---------------------------------------------------------------------------
 
-func (h *Handler) startVM(ctx context.Context, spec domain.InstanceSpec, hostPorts []int) {
+func (h *Handler) startVM(ctx context.Context, spec domain.InstanceSpec, hostPorts, allocated []int) {
 	portMap, err := h.vm.Create(ctx, spec, hostPorts)
 	if err != nil {
 		h.logger.Error("instance creation failed", "err", err)
 		return
 	}
 
-	h.saveState(spec, portMap)
+	h.saveState(spec, portMap, allocated)
 	h.logger.Info("instance running", "vm_id", h.vm.VMID(), "ports", portMap)
 }
 
-func (h *Handler) startVMWithFRPC(ctx context.Context, spec domain.InstanceSpec, hostPorts []int, sshRemote int) {
+func (h *Handler) startVMWithFRPC(ctx context.Context, spec domain.InstanceSpec, hostPorts []int, sshRemote int, allocated []int) {
 	portMap, err := h.vm.Create(ctx, spec, hostPorts)
 	if err != nil {
 		h.logger.Error("instance creation failed", "err", err)
@@ -270,17 +281,18 @@ func (h *Handler) startVMWithFRPC(ctx context.Context, spec domain.InstanceSpec,
 		h.logger.Error("frpc proxy update failed", "err", err)
 	}
 
-	h.saveState(spec, portMap)
+	h.saveState(spec, portMap, allocated)
 	h.logger.Info("instance running", "vm_id", h.vm.VMID(), "ports", portMap)
 }
 
-func (h *Handler) saveState(spec domain.InstanceSpec, portMap domain.InstancePorts) {
+func (h *Handler) saveState(spec domain.InstanceSpec, portMap domain.InstancePorts, allocated []int) {
 	state := &domain.InstanceState{
-		VMID:        h.vm.VMID(),
-		Ports:       portMap,
-		SSHEnabled:  spec.SSHEnabled,
-		GPUAddr:     spec.GPUAddr,
-		TunnelToken: spec.TunnelToken,
+		VMID:           h.vm.VMID(),
+		Ports:          portMap,
+		SSHEnabled:     spec.SSHEnabled,
+		GPUAddr:        spec.GPUAddr,
+		TunnelToken:    spec.TunnelToken,
+		AllocatedPorts: allocated,
 	}
 	if err := h.store.SaveInstanceState(state); err != nil {
 		h.logger.Error("failed to save instance state", "err", err)
@@ -327,12 +339,18 @@ func (h *Handler) ManageInstance(c *gin.Context) {
 }
 
 func (h *Handler) DeleteInstance(c *gin.Context) {
+	state, _ := h.store.LoadInstanceState()
+
 	if err := h.vm.Stop(c.Request.Context()); err != nil {
 		h.logger.Error("failed to stop instance", "err", err)
 	}
 
 	if err := h.frpc.ClearInstanceProxies(); err != nil {
 		h.logger.Error("failed to clear frpc proxies", "err", err)
+	}
+
+	if state != nil && len(state.AllocatedPorts) > 0 {
+		h.ports.Release(state.AllocatedPorts...)
 	}
 
 	if err := h.store.ClearInstanceState(); err != nil {

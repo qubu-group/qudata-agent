@@ -40,9 +40,10 @@ type InstanceSpec struct {
 type InstancePorts map[string]string
 
 type InstanceState struct {
-	VMID        string        `json:"vm_id"`
-	Ports       InstancePorts `json:"ports"`
-	SSHEnabled  bool          `json:"ssh_enabled"`
-	GPUAddr     string        `json:"gpu_addr"`
-	TunnelToken string        `json:"tunnel_token"`
+	VMID           string        `json:"vm_id"`
+	Ports          InstancePorts `json:"ports"`
+	SSHEnabled     bool          `json:"ssh_enabled"`
+	GPUAddr        string        `json:"gpu_addr"`
+	TunnelToken    string        `json:"tunnel_token"`
+	AllocatedPorts []int         `json:"allocated_ports,omitempty"`
 }

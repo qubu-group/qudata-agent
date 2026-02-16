@@ -116,7 +116,6 @@ func BuildInstanceProxies(tunnelToken string, hostPorts []int, sshRemotePort int
 		idx++
 	}
 
-	fullDomain := tunnelToken + DomainSuffix
 	for _, ps := range ports {
 		if idx >= len(hostPorts) {
 			break
@@ -132,9 +131,9 @@ func BuildInstanceProxies(tunnelToken string, hostPorts []int, sshRemotePort int
 			proxy.RemotePort = ps.RemotePort
 		case "http":
 			if ps.RemotePort > 0 {
-				proxy.CustomDomain = fmt.Sprintf("%s-%d", fullDomain, ps.RemotePort)
+				proxy.CustomDomain = fmt.Sprintf("%s-%d", tunnelToken, ps.RemotePort)
 			} else {
-				proxy.CustomDomain = fullDomain
+				proxy.CustomDomain = tunnelToken
 			}
 		}
 		proxies = append(proxies, proxy)

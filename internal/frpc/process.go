@@ -23,8 +23,11 @@ type Process struct {
 	config *Config
 	done   chan struct{}
 
-	stopCtx    context.Context
-	stopCancel context.CancelFunc
+	// runCtx is created per startProcess call and cancelled in stopProcess.
+	// This ensures the auto-restart goroutine is cancelled on both
+	// intentional restart() and full Stop().
+	runCtx    context.Context
+	runCancel context.CancelFunc
 }
 
 func NewProcess(binaryPath, configPath string, logger *slog.Logger) *Process {
@@ -43,7 +46,6 @@ func (p *Process) Start(agentID, tunnelToken string, agentPort int) error {
 		return fmt.Errorf("frpc binary not found at %s: %w", p.binaryPath, err)
 	}
 
-	p.stopCtx, p.stopCancel = context.WithCancel(context.Background())
 	p.config = NewConfig(agentID, tunnelToken, agentPort)
 
 	if err := p.writeConfig(); err != nil {
@@ -92,11 +94,6 @@ func (p *Process) ClearInstanceProxies() error {
 func (p *Process) Stop() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
-	if p.stopCancel != nil {
-		p.stopCancel()
-	}
-
 	return p.stopProcess()
 }
 
@@ -124,7 +121,15 @@ func (p *Process) writeConfig() error {
 	return nil
 }
 
+// startProcess launches the frpc binary and starts a monitor goroutine.
+// Must be called with p.mu held.
 func (p *Process) startProcess() error {
+	// Cancel any lingering monitor goroutine from a previous run.
+	if p.runCancel != nil {
+		p.runCancel()
+	}
+	p.runCtx, p.runCancel = context.WithCancel(context.Background())
+
 	p.cmd = exec.Command(p.binaryPath, "-c", p.configPath)
 	p.cmd.Stdout = os.Stdout
 	p.cmd.Stderr = os.Stderr
@@ -136,34 +141,9 @@ func (p *Process) startProcess() error {
 	p.logger.Info("frpc started", "pid", p.cmd.Process.Pid, "config", p.configPath)
 
 	p.done = make(chan struct{})
-	go func() {
-		err := p.cmd.Wait()
-		close(p.done)
+	go p.monitor(p.runCtx)
 
-		if p.stopCtx != nil {
-			select {
-			case <-p.stopCtx.Done():
-				p.logger.Info("frpc process exited during shutdown")
-				return
-			default:
-			}
-		}
-
-		if err != nil {
-			p.logger.Error("frpc process crashed, restarting in 3s", "err", err)
-		} else {
-			p.logger.Warn("frpc process exited unexpectedly, restarting in 3s")
-		}
-
-		time.Sleep(3 * time.Second)
-
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		if restartErr := p.startProcess(); restartErr != nil {
-			p.logger.Error("frpc auto-restart failed", "err", restartErr)
-		}
-	}()
-
+	// Give the process a moment — detect immediate exit.
 	select {
 	case <-p.done:
 		return fmt.Errorf("frpc exited immediately with code %d", p.cmd.ProcessState.ExitCode())
@@ -173,7 +153,60 @@ func (p *Process) startProcess() error {
 	return nil
 }
 
+// monitor waits for the frpc process to exit. If the exit was unexpected
+// (ctx not cancelled), it auto-restarts after a delay.
+func (p *Process) monitor(ctx context.Context) {
+	cmd := p.cmd
+	done := p.done
+
+	err := cmd.Wait()
+	close(done)
+
+	// If ctx is cancelled, stop or restart was intentional — do not auto-restart.
+	select {
+	case <-ctx.Done():
+		p.logger.Info("frpc process exited (controlled)")
+		return
+	default:
+	}
+
+	if err != nil {
+		p.logger.Error("frpc crashed, restarting in 3s", "err", err)
+	} else {
+		p.logger.Warn("frpc exited unexpectedly, restarting in 3s")
+	}
+
+	// Wait before restart, but bail if context is cancelled during the wait.
+	select {
+	case <-time.After(3 * time.Second):
+	case <-ctx.Done():
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Double-check: context may have been cancelled while waiting for the lock.
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
+	if restartErr := p.startProcess(); restartErr != nil {
+		p.logger.Error("frpc auto-restart failed", "err", restartErr)
+	}
+}
+
+// stopProcess terminates the running frpc subprocess.
+// Must be called with p.mu held.
 func (p *Process) stopProcess() error {
+	// Cancel the monitor goroutine first to prevent auto-restart.
+	if p.runCancel != nil {
+		p.runCancel()
+		p.runCancel = nil
+	}
+
 	if p.cmd == nil || p.cmd.Process == nil {
 		return nil
 	}
