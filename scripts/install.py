@@ -508,12 +508,17 @@ def prepare_base_image():
         "> /etc/systemd/system/systemd-networkd-wait-online.service.d/any.conf; "
         "true",
 
-        # SSH: allow root login, disable locale forwarding (prevents LC_CTYPE warnings)
+        # SSH: allow root login, disable locale forwarding, enable keepalive
+        # (prevents idle tunnel disconnects through FRP/SLIRP chain)
         "--run-command",
         "sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config; "
         "sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config; "
         "sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config; "
         "sed -i 's/^AcceptEnv.*/#AcceptEnv/' /etc/ssh/sshd_config; "
+        "sed -i 's/^#*ClientAliveInterval.*/ClientAliveInterval 30/' /etc/ssh/sshd_config; "
+        "grep -q '^ClientAliveInterval' /etc/ssh/sshd_config || echo 'ClientAliveInterval 30' >> /etc/ssh/sshd_config; "
+        "sed -i 's/^#*ClientAliveCountMax.*/ClientAliveCountMax 3/' /etc/ssh/sshd_config; "
+        "grep -q '^ClientAliveCountMax' /etc/ssh/sshd_config || echo 'ClientAliveCountMax 3' >> /etc/ssh/sshd_config; "
         "systemctl enable ssh 2>/dev/null; systemctl enable sshd 2>/dev/null; true",
 
         # Set sane default locale

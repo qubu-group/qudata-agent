@@ -304,10 +304,17 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 			m.logger.Info("VM root credentials", "username", "root", "password", rootPass)
 		}
 
-		// Allow PasswordAuthentication and reload sshd (also picks up management_keys).
-		enablePassAuth := `sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null; true`
-		if out, err := sshClient.Run(ctx, enablePassAuth); err != nil {
-			m.logger.Warn("failed to enable password auth", "err", err, "output", string(out))
+		// Allow PasswordAuthentication, enable SSH keepalive (prevents idle
+		// tunnel disconnects through FRP/SLIRP chain), and reload sshd
+		// (also picks up management_keys).
+		hardenSSH := `sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && ` +
+			`sed -i 's/^#*ClientAliveInterval.*/ClientAliveInterval 30/' /etc/ssh/sshd_config && ` +
+			`grep -q '^ClientAliveInterval' /etc/ssh/sshd_config || echo 'ClientAliveInterval 30' >> /etc/ssh/sshd_config && ` +
+			`sed -i 's/^#*ClientAliveCountMax.*/ClientAliveCountMax 3/' /etc/ssh/sshd_config && ` +
+			`grep -q '^ClientAliveCountMax' /etc/ssh/sshd_config || echo 'ClientAliveCountMax 3' >> /etc/ssh/sshd_config && ` +
+			`systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null; true`
+		if out, err := sshClient.Run(ctx, hardenSSH); err != nil {
+			m.logger.Warn("failed to harden sshd config", "err", err, "output", string(out))
 		}
 	}
 
