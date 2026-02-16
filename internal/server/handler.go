@@ -343,7 +343,13 @@ func (h *Handler) ManageInstance(c *gin.Context) {
 func (h *Handler) DeleteInstance(c *gin.Context) {
 	state, _ := h.store.LoadInstanceState()
 
-	if err := h.vm.Stop(c.Request.Context()); err != nil {
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+
+	go h.destroyInstance(state)
+}
+
+func (h *Handler) destroyInstance(state *domain.InstanceState) {
+	if err := h.vm.Stop(context.Background()); err != nil {
 		h.logger.Error("failed to stop instance", "err", err)
 	}
 
@@ -359,7 +365,7 @@ func (h *Handler) DeleteInstance(c *gin.Context) {
 		h.logger.Error("failed to clear instance state", "err", err)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	h.logger.Info("instance destroyed")
 }
 
 // ---------------------------------------------------------------------------
