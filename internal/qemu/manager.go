@@ -274,16 +274,23 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 		m.sshClient = sshClient
 		m.logger.Info("VM SSH ready", "vm_id", vmID)
 
-		// Ensure management SSH key is in authorized_keys (cloud-init may overwrite on boot).
+		// Persist management key in a location that survives cloud-init.
+		// Cloud-init may overwrite /root/.ssh/authorized_keys on boot,
+		// so we write to a separate sshd-level file and reload.
 		if m.sshKeyPath != "" {
 			pubKeyPath := m.sshKeyPath + ".pub"
 			if pubData, err := os.ReadFile(pubKeyPath); err == nil {
 				pubKey := strings.TrimSpace(string(pubData))
-				ensureCmd := fmt.Sprintf(
-					`mkdir -p /root/.ssh && chmod 700 /root/.ssh && grep -qF '%s' /root/.ssh/authorized_keys 2>/dev/null || echo '%s' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys`,
-					pubKey, pubKey,
+				setupCmd := fmt.Sprintf(
+					`echo '%s' > /etc/ssh/management_keys && chmod 600 /etc/ssh/management_keys && `+
+						`mkdir -p /root/.ssh && chmod 700 /root/.ssh && `+
+						`grep -qF '%s' /root/.ssh/authorized_keys 2>/dev/null || echo '%s' >> /root/.ssh/authorized_keys && `+
+						`chmod 600 /root/.ssh/authorized_keys && `+
+						`grep -q 'management_keys' /etc/ssh/sshd_config || `+
+						`sed -i 's|^#*AuthorizedKeysFile.*|AuthorizedKeysFile .ssh/authorized_keys /etc/ssh/management_keys|' /etc/ssh/sshd_config`,
+					pubKey, pubKey, pubKey,
 				)
-				if out, err := sshClient.Run(ctx, ensureCmd); err != nil {
+				if out, err := sshClient.Run(ctx, setupCmd); err != nil {
 					m.logger.Warn("failed to ensure management key", "err", err, "output", string(out))
 				}
 			}
@@ -297,7 +304,7 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 			m.logger.Info("VM root credentials", "username", "root", "password", rootPass)
 		}
 
-		// Allow PasswordAuthentication for user SSH access.
+		// Allow PasswordAuthentication and reload sshd (also picks up management_keys).
 		enablePassAuth := `sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null; true`
 		if out, err := sshClient.Run(ctx, enablePassAuth); err != nil {
 			m.logger.Warn("failed to enable password auth", "err", err, "output", string(out))
