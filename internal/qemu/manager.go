@@ -25,7 +25,7 @@ type Config struct {
 	BaseImagePath string
 	ImageDir      string
 	RunDir        string
-	DefaultGPU    string
+	DefaultGPUs   []string
 	SSHKeyPath    string
 	DefaultCPUs   string
 	DefaultMemory string
@@ -39,7 +39,7 @@ type Manager struct {
 	ovmfCode     string
 	ovmfVarsTmpl string
 	baseImage    string
-	defaultGPU   string
+	defaultGPUs  []string
 	runDir       string
 	sshKeyPath   string
 	defaultCPU   string
@@ -52,12 +52,12 @@ type Manager struct {
 	vmID         string
 	cmd          *exec.Cmd
 	logFile      *os.File
-	vfio         *VFIO
+	vfios        []*VFIO
 	qmp          *QMPClient
 	sshClient    *SSHClient
 	diskPath     string
 	qmpSocket    string
-	gpuAddr      string
+	gpuAddrs     []string
 	ovmfVarsPath string
 	done         chan struct{}
 	portPool     map[int]int
@@ -84,7 +84,7 @@ func NewManager(cfg Config, logger *slog.Logger) *Manager {
 		ovmfCode:     cfg.OVMFCodePath,
 		ovmfVarsTmpl: cfg.OVMFVarsPath,
 		baseImage:    cfg.BaseImagePath,
-		defaultGPU:   cfg.DefaultGPU,
+		defaultGPUs:  cfg.DefaultGPUs,
 		runDir:       cfg.RunDir,
 		sshKeyPath:   cfg.SSHKeyPath,
 		defaultCPU:   cpus,
@@ -107,13 +107,16 @@ func (m *Manager) KillOrphans() {
 		m.logger.Info("killing orphan VM", "vm_id", o.VMID, "pid", o.PID)
 		_ = KillProcess(o.PID)
 		_ = os.Remove(o.QMPSocket)
+		removeVMArtifacts(m.runDir, o.VMID)
 	}
 
-	if m.defaultGPU != "" {
-		vfio := NewVFIO(m.defaultGPU)
+	CleanOrphanArtifacts(m.runDir)
+
+	for _, addr := range m.defaultGPUs {
+		vfio := NewVFIO(addr)
 		vfio.RestoreBinding()
 		if vfio.Bound() {
-			m.logger.Info("unbinding orphan GPU from VFIO", "addr", m.defaultGPU)
+			m.logger.Info("unbinding orphan GPU from VFIO", "addr", addr)
 			_ = vfio.Unbind()
 		}
 	}
@@ -131,12 +134,9 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 		return nil, domain.ErrInstanceAlreadyRunning{}
 	}
 
-	gpuAddr := spec.GPUAddr
-	if gpuAddr == "" {
-		gpuAddr = m.defaultGPU
-	}
-	if gpuAddr == "" {
-		return nil, domain.ErrQEMU{Op: "create", Err: fmt.Errorf("no GPU PCI address")}
+	gpuAddrs := m.defaultGPUs
+	if len(gpuAddrs) == 0 {
+		return nil, domain.ErrQEMU{Op: "create", Err: fmt.Errorf("no GPU PCI addresses")}
 	}
 
 	cpus := spec.CPUs
@@ -152,16 +152,25 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 		diskGB = m.diskSizeGB
 	}
 
-	vfio := NewVFIO(gpuAddr)
-	if err := vfio.Bind(); err != nil {
-		return nil, domain.ErrVFIO{Op: "bind", Addr: gpuAddr, Err: err}
+	var vfios []*VFIO
+	for _, addr := range gpuAddrs {
+		v := NewVFIO(addr)
+		if err := v.Bind(); err != nil {
+			for _, bound := range vfios {
+				_ = bound.Unbind()
+			}
+			return nil, domain.ErrVFIO{Op: "bind", Addr: addr, Err: err}
+		}
+		vfios = append(vfios, v)
 	}
 
 	vmID := "vm-" + uuid.New().String()[:8]
 
 	diskPath, err := m.prepareDisk(vmID, diskGB)
 	if err != nil {
-		_ = vfio.Unbind()
+		for _, v := range vfios {
+			_ = v.Unbind()
+		}
 		return nil, domain.ErrQEMU{Op: "disk", Err: err}
 	}
 
@@ -175,7 +184,9 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 
 	if len(hostPorts) < len(guestPorts) {
 		_ = m.images.RemoveDisk(diskPath)
-		_ = vfio.Unbind()
+		for _, v := range vfios {
+			_ = v.Unbind()
+		}
 		return nil, domain.ErrQEMU{Op: "ports", Err: fmt.Errorf("not enough host ports: need %d, got %d", len(guestPorts), len(hostPorts))}
 	}
 
@@ -191,23 +202,27 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 
 	if err := os.MkdirAll(m.runDir, 0o755); err != nil {
 		_ = m.images.RemoveDisk(diskPath)
-		_ = vfio.Unbind()
+		for _, v := range vfios {
+			_ = v.Unbind()
+		}
 		return nil, domain.ErrQEMU{Op: "rundir", Err: err}
 	}
 
 	ovmfVarsPath, err := m.copyOVMFVars(vmID)
 	if err != nil {
 		_ = m.images.RemoveDisk(diskPath)
-		_ = vfio.Unbind()
+		for _, v := range vfios {
+			_ = v.Unbind()
+		}
 		return nil, domain.ErrQEMU{Op: "ovmf", Err: err}
 	}
 
 	qmpSocket := filepath.Join(m.runDir, vmID+".qmp")
-	args := m.buildVMArgs(diskPath, gpuAddr, qmpSocket, netCfg, cpus, mem, ovmfVarsPath)
+	args := m.buildVMArgs(diskPath, gpuAddrs, qmpSocket, netCfg, cpus, mem, ovmfVarsPath)
 
 	logFile, _ := os.Create(filepath.Join(m.runDir, vmID+".log"))
 
-	m.logger.Info("starting VM", "vm_id", vmID, "gpu", gpuAddr, "cpus", cpus, "mem", mem)
+	m.logger.Info("starting VM", "vm_id", vmID, "gpus", gpuAddrs, "cpus", cpus, "mem", mem)
 
 	cmd := exec.Command(m.qemuBin, args...)
 	if logFile != nil {
@@ -220,18 +235,20 @@ func (m *Manager) Create(ctx context.Context, spec domain.InstanceSpec, hostPort
 			logFile.Close()
 		}
 		_ = m.images.RemoveDisk(diskPath)
-		_ = vfio.Unbind()
+		for _, v := range vfios {
+			_ = v.Unbind()
+		}
 		return nil, domain.ErrQEMU{Op: "start", Err: err}
 	}
 
 	m.vmID = vmID
 	m.cmd = cmd
 	m.logFile = logFile
-	m.vfio = vfio
+	m.vfios = vfios
 	m.portPool = pool
 	m.diskPath = diskPath
 	m.qmpSocket = qmpSocket
-	m.gpuAddr = gpuAddr
+	m.gpuAddrs = gpuAddrs
 	m.ovmfVarsPath = ovmfVarsPath
 
 	m.done = make(chan struct{})
@@ -596,7 +613,7 @@ func (m *Manager) prepareDisk(vmID string, sizeGB int) (string, error) {
 	return m.images.CreateDisk(vmID, sizeGB)
 }
 
-func (m *Manager) buildVMArgs(diskPath, gpuAddr, qmpSocket string, net *NetworkConfig, cpus, mem, ovmfVarsPath string) []string {
+func (m *Manager) buildVMArgs(diskPath string, gpuAddrs []string, qmpSocket string, net *NetworkConfig, cpus, mem, ovmfVarsPath string) []string {
 	args := []string{
 		"-machine", "q35,accel=kvm",
 		"-cpu", "host",
@@ -611,7 +628,11 @@ func (m *Manager) buildVMArgs(diskPath, gpuAddr, qmpSocket string, net *NetworkC
 	}
 	args = append(args,
 		"-drive", fmt.Sprintf("file=%s,format=qcow2,if=virtio", diskPath),
-		"-device", fmt.Sprintf("vfio-pci,host=%s", gpuAddr),
+	)
+	for _, addr := range gpuAddrs {
+		args = append(args, "-device", fmt.Sprintf("vfio-pci,host=%s", addr))
+	}
+	args = append(args,
 		"-qmp", fmt.Sprintf("unix:%s,server,nowait", qmpSocket),
 		"-nographic",
 	)
@@ -667,12 +688,12 @@ func (m *Manager) cleanup() {
 		m.qmp = nil
 	}
 
-	if m.vfio != nil {
-		if err := m.vfio.Unbind(); err != nil {
+	for _, v := range m.vfios {
+		if err := v.Unbind(); err != nil {
 			m.logger.Warn("VFIO unbind error during cleanup", "err", err)
 		}
-		m.vfio = nil
 	}
+	m.vfios = nil
 
 	if m.diskPath != "" {
 		_ = m.images.RemoveDisk(m.diskPath)
@@ -683,6 +704,9 @@ func (m *Manager) cleanup() {
 	if m.ovmfVarsPath != "" {
 		_ = os.Remove(m.ovmfVarsPath)
 	}
+	if m.vmID != "" {
+		_ = os.Remove(filepath.Join(m.runDir, m.vmID+".log"))
+	}
 
 	m.vmID = ""
 	m.cmd = nil
@@ -691,9 +715,10 @@ func (m *Manager) cleanup() {
 	m.portPool = nil
 	m.diskPath = ""
 	m.qmpSocket = ""
-	m.gpuAddr = ""
+	m.gpuAddrs = nil
 	m.ovmfVarsPath = ""
 	m.done = nil
+	m.failed = false
 }
 
 func mapQMPStatus(s string) domain.InstanceStatus {

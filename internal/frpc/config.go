@@ -39,8 +39,8 @@ method = "token"
 token = "{{ .AuthToken }}"
 
 [transport]
-tcpMuxKeepaliveInterval = 300
-dialServerKeepalive = 120
+tcpMuxKeepaliveInterval = 30
+dialServerKeepalive = 30
 
 [log]
 to = "console"

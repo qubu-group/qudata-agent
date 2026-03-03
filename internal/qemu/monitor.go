@@ -132,6 +132,7 @@ func (c *QMPClient) Close() error {
 	if c.conn != nil {
 		err := c.conn.Close()
 		c.conn = nil
+		c.dec = nil
 		return err
 	}
 	return nil

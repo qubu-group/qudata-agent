@@ -92,12 +92,45 @@ func FindOrphanVMs(runDir string) ([]ProcessInfo, error) {
 				VMID:      vmID,
 			})
 		} else {
-			// No process found - clean up stale socket
+			// No process found - clean up stale socket and associated files
 			_ = os.Remove(qmpSocket)
+			removeVMArtifacts(runDir, vmID)
 		}
 	}
 
 	return orphans, nil
+}
+
+// CleanOrphanArtifacts removes leftover .log and OVMF_VARS files in runDir
+// that no longer have a corresponding running QEMU process.
+func CleanOrphanArtifacts(runDir string) {
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		var vmID string
+		switch {
+		case strings.HasSuffix(name, ".log"):
+			vmID = strings.TrimSuffix(name, ".log")
+		case strings.HasSuffix(name, "-OVMF_VARS.fd"):
+			vmID = strings.TrimSuffix(name, "-OVMF_VARS.fd")
+		default:
+			continue
+		}
+		qmpSocket := filepath.Join(runDir, vmID+".qmp")
+		if _, err := os.Stat(qmpSocket); err == nil {
+			continue
+		}
+		_ = os.Remove(filepath.Join(runDir, name))
+	}
+}
+
+// removeVMArtifacts removes leftover .log and OVMF_VARS files for a given VM ID.
+func removeVMArtifacts(runDir, vmID string) {
+	_ = os.Remove(filepath.Join(runDir, vmID+".log"))
+	_ = os.Remove(filepath.Join(runDir, vmID+"-OVMF_VARS.fd"))
 }
 
 // ProcessExists checks if a process with the given PID exists.

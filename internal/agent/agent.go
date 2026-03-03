@@ -58,7 +58,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Agent, error) {
 		BaseImagePath: cfg.BaseImagePath,
 		ImageDir:      cfg.ImageDir,
 		RunDir:        cfg.VMRunDir,
-		DefaultGPU:    cfg.GPUPCIAddr,
+		DefaultGPUs:   cfg.GPUPCIAddrs,
 		SSHKeyPath:    sshKeyPath,
 		DefaultCPUs:   cfg.VMDefaultCPUs,
 		DefaultMemory: cfg.VMDefaultMemory,
@@ -233,7 +233,7 @@ func (a *Agent) bootstrap(ctx context.Context) (*domain.AgentMetadata, error) {
 }
 
 func (a *Agent) publishStats(ctx context.Context) {
-	ticker := time.NewTicker(1500 * time.Millisecond)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	errCount := 0

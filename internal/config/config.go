@@ -29,7 +29,7 @@ type Config struct {
 	BaseImagePath     string
 	ImageDir          string
 	VMRunDir          string
-	GPUPCIAddr        string
+	GPUPCIAddrs       []string
 	ManagementKeyPath string
 
 	VMDefaultCPUs   string
@@ -117,12 +117,18 @@ func Load() (*Config, error) {
 		cfg.VMRunDir = v
 	}
 	if v := os.Getenv("QUDATA_GPU_PCI_ADDR"); v != "" {
-		cfg.GPUPCIAddr = strings.TrimSpace(v)
+		cfg.GPUPCIAddrs = []string{strings.TrimSpace(v)}
 	}
-	if v := os.Getenv("QUDATA_GPU_PCI_ADDRS"); v != "" && cfg.GPUPCIAddr == "" {
-		addrs := strings.Split(v, ",")
-		if len(addrs) > 0 && strings.TrimSpace(addrs[0]) != "" {
-			cfg.GPUPCIAddr = strings.TrimSpace(addrs[0])
+	if v := os.Getenv("QUDATA_GPU_PCI_ADDRS"); v != "" {
+		var addrs []string
+		for _, a := range strings.Split(v, ",") {
+			a = strings.TrimSpace(a)
+			if a != "" {
+				addrs = append(addrs, a)
+			}
+		}
+		if len(addrs) > 0 {
+			cfg.GPUPCIAddrs = addrs
 		}
 	}
 	if v := os.Getenv("QUDATA_MANAGEMENT_KEY"); v != "" {
