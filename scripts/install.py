@@ -857,6 +857,21 @@ def restore_gpu_to_host(gpu_addr):
         pass
 
 
+def _unload_nvidia_modules():
+    """Unload NVIDIA kernel modules so the GPU can be unbound from nvidia driver."""
+    modules = ["nvidia_uvm", "nvidia_drm", "nvidia_modeset", "nvidia"]
+    for mod in modules:
+        r = run(["rmmod", mod], check=False, capture_output=True)
+        if r.returncode != 0:
+            stderr = r.stderr.decode().strip() if r.stderr else ""
+            if "not currently loaded" in stderr or "not found" in stderr:
+                continue
+            if "in use" in stderr:
+                print(f"  ! Cannot unload {mod}: {stderr}")
+                return False
+    return True
+
+
 def bind_gpu_to_vfio(gpu_addr):
     """Bind a PCI device to vfio-pci driver."""
     device_dir = Path(f"/sys/bus/pci/devices/{gpu_addr}")
@@ -872,6 +887,9 @@ def bind_gpu_to_vfio(gpu_addr):
         current = os.path.basename(os.readlink(str(driver_link)))
         if current == "vfio-pci":
             return True
+        if current == "nvidia":
+            if not _unload_nvidia_modules():
+                return False
         unbind_path = device_dir / "driver" / "unbind"
         try:
             unbind_path.write_text(gpu_addr)

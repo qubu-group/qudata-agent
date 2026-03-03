@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -329,10 +330,12 @@ func (h *Handler) ManageInstance(c *gin.Context) {
 	cmd := domain.InstanceCommand(req.Command)
 	if err := h.vm.Manage(c.Request.Context(), cmd); err != nil {
 		code := http.StatusInternalServerError
-		if _, ok := err.(domain.ErrNoInstanceRunning); ok {
+		var errNoInstanceRunning domain.ErrNoInstanceRunning
+		if errors.As(err, &errNoInstanceRunning) {
 			code = http.StatusNotFound
 		}
-		if _, ok := err.(domain.ErrUnknownCommand); ok {
+		var errUnknownCommand domain.ErrUnknownCommand
+		if errors.As(err, &errUnknownCommand) {
 			code = http.StatusBadRequest
 		}
 		c.JSON(code, gin.H{"ok": false, "error": err.Error()})
