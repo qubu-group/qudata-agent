@@ -96,11 +96,8 @@ func (v *VFIO) Bind() error {
 		v.origDriver = filepath.Base(link)
 	}
 
-	// Unload NVIDIA modules if GPU is using nvidia driver
-	if v.origDriver == "nvidia" {
-		if err := v.unloadNVIDIAModules(); err != nil {
-			return err
-		}
+	if err := v.unloadGPUModules(); err != nil {
+		return err
 	}
 
 	// Bind all devices in the IOMMU group to vfio-pci
@@ -195,40 +192,31 @@ func (v *VFIO) validateIOMMUGroup() error {
 	return nil
 }
 
-// unloadNVIDIAModules attempts to unload the NVIDIA kernel modules.
-// Returns an error if the GPU is in use and modules cannot be unloaded.
-func (v *VFIO) unloadNVIDIAModules() error {
-	// Check if any NVIDIA modules are loaded
-	modsLoaded := false
-	for _, mod := range nvidiaModules {
-		if isModuleLoaded(mod) {
-			modsLoaded = true
-			break
-		}
-	}
-
-	if !modsLoaded {
+func (v *VFIO) unloadGPUModules() error {
+	var modules []string
+	switch v.origDriver {
+	case "nvidia":
+		modules = nvidiaModules
+	case "nouveau":
+		modules = []string{"nouveau"}
+	default:
 		return nil
 	}
 
-	// Try to unload modules in order
-	for _, mod := range nvidiaModules {
+	for _, mod := range modules {
 		if !isModuleLoaded(mod) {
 			continue
 		}
-
 		cmd := exec.Command("rmmod", mod)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			// Check if module is in use
-			if strings.Contains(string(out), "in use") || strings.Contains(string(out), "Module") {
-				return fmt.Errorf("GPU is in use, cannot bind to VFIO: failed to unload %s: %s",
-					mod, strings.TrimSpace(string(out)))
+			msg := strings.TrimSpace(string(out))
+			if strings.Contains(msg, "in use") {
+				return fmt.Errorf("GPU is in use, cannot bind to VFIO: failed to unload %s: %s", mod, msg)
 			}
-			return fmt.Errorf("failed to unload NVIDIA module %s: %w: %s", mod, err, strings.TrimSpace(string(out)))
+			return fmt.Errorf("failed to unload module %s: %w: %s", mod, err, msg)
 		}
 	}
-
 	return nil
 }
 

@@ -857,12 +857,13 @@ def restore_gpu_to_host(gpu_addr):
         pass
 
 
-def _unload_nvidia_modules():
+def _unload_gpu_modules(driver):
     for svc in ["nvidia-persistenced", "nvidia-fabricmanager", "nvidia-powerd", "dcgm"]:
         run(["systemctl", "stop", svc], check=False)
-    run(["sync"], check=False)
-    Path("/proc/sys/vm/drop_caches").write_text("3\n") if Path("/proc/sys/vm/drop_caches").exists() else None
-    modules = ["nvidia_uvm", "nvidia_drm", "nvidia_modeset", "nvidia"]
+    if driver == "nouveau":
+        modules = ["nouveau"]
+    else:
+        modules = ["nvidia_uvm", "nvidia_drm", "nvidia_modeset", "nvidia"]
     for mod in modules:
         r = run(["rmmod", mod], check=False)
         if r.returncode != 0:
@@ -890,8 +891,8 @@ def bind_gpu_to_vfio(gpu_addr):
         current = os.path.basename(os.readlink(str(driver_link)))
         if current == "vfio-pci":
             return True
-        if current == "nvidia":
-            if not _unload_nvidia_modules():
+        if current in ("nvidia", "nouveau"):
+            if not _unload_gpu_modules(current):
                 return False
         unbind_path = device_dir / "driver" / "unbind"
         try:
