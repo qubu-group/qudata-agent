@@ -858,12 +858,11 @@ def restore_gpu_to_host(gpu_addr):
 
 
 def _unload_nvidia_modules():
-    """Unload NVIDIA kernel modules so the GPU can be unbound from nvidia driver."""
     modules = ["nvidia_uvm", "nvidia_drm", "nvidia_modeset", "nvidia"]
     for mod in modules:
-        r = run(["rmmod", mod], check=False, capture_output=True)
+        r = run(["rmmod", mod], check=False)
         if r.returncode != 0:
-            stderr = r.stderr.decode().strip() if r.stderr else ""
+            stderr = r.stderr.strip() if r.stderr else ""
             if "not currently loaded" in stderr or "not found" in stderr:
                 continue
             if "in use" in stderr:
