@@ -858,6 +858,10 @@ def restore_gpu_to_host(gpu_addr):
 
 
 def _unload_nvidia_modules():
+    for svc in ["nvidia-persistenced", "nvidia-fabricmanager", "nvidia-powerd", "dcgm"]:
+        run(["systemctl", "stop", svc], check=False)
+    run(["sync"], check=False)
+    Path("/proc/sys/vm/drop_caches").write_text("3\n") if Path("/proc/sys/vm/drop_caches").exists() else None
     modules = ["nvidia_uvm", "nvidia_drm", "nvidia_modeset", "nvidia"]
     for mod in modules:
         r = run(["rmmod", mod], check=False)
