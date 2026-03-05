@@ -164,6 +164,36 @@ def check_iommu_enabled():
     return Path("/sys/kernel/iommu_groups/0").exists()
 
 
+def _vfio_ids_str(gpus, audio_devices):
+    ids = set()
+    for gpu in gpus:
+        ids.add(f"{gpu['vendor']}:{gpu['device']}")
+    for audio in audio_devices:
+        ids.add(f"{audio['vendor']}:{audio['device']}")
+    return ",".join(sorted(ids))
+
+
+def _configure_gpu_blacklist(gpus, audio_devices):
+    """Write modprobe blacklist, vfio module config, and rebuild initramfs."""
+    print("\n-> Configuring GPU driver blacklist")
+
+    vfio_ids = _vfio_ids_str(gpus, audio_devices)
+
+    Path("/etc/modules-load.d/vfio.conf").write_text(
+        "vfio\nvfio_iommu_type1\nvfio_pci\n"
+    )
+    Path("/etc/modprobe.d/blacklist-nvidia.conf").write_text(
+        "blacklist nouveau\nblacklist nvidia\nblacklist nvidia_drm\n"
+        "blacklist nvidia_modeset\nblacklist nvidia_uvm\n"
+    )
+    Path("/etc/modprobe.d/vfio.conf").write_text(
+        f"options vfio-pci ids={vfio_ids}\n"
+    )
+    print(f"  + Blacklisted nouveau/nvidia, vfio-pci ids={vfio_ids}")
+
+    run(["update-initramfs", "-u"])
+
+
 def configure_iommu(gpus, audio_devices):
     print("\n-> Configuring IOMMU")
 
@@ -172,13 +202,7 @@ def configure_iommu(gpus, audio_devices):
         sys.exit("GRUB config not found")
 
     grub_content = grub_file.read_text()
-
-    vfio_ids = set()
-    for gpu in gpus:
-        vfio_ids.add(f"{gpu['vendor']}:{gpu['device']}")
-    for audio in audio_devices:
-        vfio_ids.add(f"{audio['vendor']}:{audio['device']}")
-    vfio_ids_str = ",".join(sorted(vfio_ids))
+    vfio_ids = _vfio_ids_str(gpus, audio_devices)
 
     cpu_vendor = "intel"
     with open("/proc/cpuinfo") as f:
@@ -188,7 +212,7 @@ def configure_iommu(gpus, audio_devices):
     iommu_param = (
         "intel_iommu=on" if cpu_vendor == "intel" else "amd_iommu=on"
     )
-    new_params = f"{iommu_param} iommu=pt vfio-pci.ids={vfio_ids_str}"
+    new_params = f"{iommu_param} iommu=pt vfio-pci.ids={vfio_ids}"
 
     pattern = r'GRUB_CMDLINE_LINUX="([^"]*)"'
     match = re.search(pattern, grub_content)
@@ -209,18 +233,7 @@ def configure_iommu(gpus, audio_devices):
     grub_file.write_text(grub_content)
     print(f"  + GRUB: {new_params}")
 
-    Path("/etc/modules-load.d/vfio.conf").write_text(
-        "vfio\nvfio_iommu_type1\nvfio_pci\n"
-    )
-    Path("/etc/modprobe.d/blacklist-nvidia.conf").write_text(
-        "blacklist nouveau\nblacklist nvidia\nblacklist nvidia_drm\n"
-        "blacklist nvidia_modeset\nblacklist nvidia_uvm\n"
-    )
-    Path("/etc/modprobe.d/vfio.conf").write_text(
-        f"options vfio-pci ids={vfio_ids_str}\n"
-    )
-
-    run(["update-initramfs", "-u"])
+    _configure_gpu_blacklist(gpus, audio_devices)
     run(["update-grub"])
 
     run(["systemctl", "stop", "nvidia-persistenced.service"], check=False)
@@ -836,138 +849,222 @@ def test_gpu_passthrough(gpu_addr):
             Path(f).unlink(missing_ok=True)
 
 
-def restore_gpu_to_host(gpu_addr):
-    """Unbind a GPU from vfio-pci and trigger kernel re-probe."""
-    device_dir = Path(f"/sys/bus/pci/devices/{gpu_addr}")
-    vfio_unbind = Path("/sys/bus/pci/drivers/vfio-pci/unbind")
-    override = device_dir / "driver_override"
-    probe = Path("/sys/bus/pci/drivers_probe")
+# ---------------------------------------------------------------------------
+# GPU VFIO binding (inspired by Cocoon's setup-gpu-vfio approach)
+#
+# Safety invariant: NEVER hot-unbind nouveau via sysfs — it has kernel bugs
+# that crash the machine. Nouveau must be blacklisted and removed via reboot.
+# Only nvidia proprietary driver supports safe hot-unbind.
+# ---------------------------------------------------------------------------
 
-    try:
-        vfio_unbind.write_text(gpu_addr)
-    except OSError:
-        pass
-    try:
-        override.write_text("\n")
-    except OSError:
-        pass
-    try:
-        probe.write_text(gpu_addr)
-    except OSError:
-        pass
+_NVIDIA_MODULES = ["nvidia_uvm", "nvidia_drm", "nvidia_modeset", "nvidia"]
+_NVIDIA_SERVICES = [
+    "nvidia-persistenced", "nvidia-fabricmanager", "nvidia-powerd", "dcgm",
+]
 
 
-def _unload_gpu_modules(driver):
-    for svc in ["nvidia-persistenced", "nvidia-fabricmanager", "nvidia-powerd", "dcgm"]:
+def _pci_device_dir(addr):
+    return Path(f"/sys/bus/pci/devices/{addr}")
+
+
+def _read_pci_driver(addr):
+    """Return current driver name for PCI device, or None."""
+    link = _pci_device_dir(addr) / "driver"
+    try:
+        return os.path.basename(os.readlink(str(link)))
+    except OSError:
+        return None
+
+
+def _read_pci_class(addr):
+    """Return PCI class code string (e.g. '0x030000'), or empty string."""
+    try:
+        return (_pci_device_dir(addr) / "class").read_text().strip()
+    except OSError:
+        return ""
+
+
+def _is_module_loaded(name):
+    try:
+        modules = Path("/proc/modules").read_text()
+        return any(line.split()[0] == name for line in modules.splitlines() if line)
+    except OSError:
+        return False
+
+
+def _gpu_needs_reboot(gpu_addr):
+    """Return True if the GPU cannot be safely hot-detached and needs a reboot."""
+    drv = _read_pci_driver(gpu_addr)
+    if drv is None or drv == "vfio-pci":
+        return False
+    if drv == "nouveau":
+        return True
+    return False
+
+
+def find_iommu_group_devices(gpu_addr):
+    """Return list of PCI addresses in the same IOMMU group, skipping bridges."""
+    group_path = _pci_device_dir(gpu_addr) / "iommu_group" / "devices"
+    if not group_path.exists():
+        return [gpu_addr]
+    result = []
+    for entry in sorted(group_path.iterdir()):
+        cls = _read_pci_class(entry.name)
+        if cls.startswith("0x0604"):
+            continue
+        result.append(entry.name)
+    return result
+
+
+def _stop_nvidia_services():
+    for svc in _NVIDIA_SERVICES:
         run(["systemctl", "stop", svc], check=False)
-    if driver == "nouveau":
-        modules = ["nouveau"]
-    else:
-        modules = ["nvidia_uvm", "nvidia_drm", "nvidia_modeset", "nvidia"]
-    for mod in modules:
+
+
+def _unbind_vtconsoles():
+    """Unbind VT consoles from framebuffer so GPU kernel modules can be unloaded."""
+    vtcon_dir = Path("/sys/class/vtconsole")
+    if not vtcon_dir.exists():
+        return
+    for vtcon in sorted(vtcon_dir.iterdir()):
+        bind_file = vtcon / "bind"
+        try:
+            if bind_file.read_text().strip() == "1":
+                bind_file.write_text("0")
+        except OSError:
+            pass
+
+
+def _unbind_efi_framebuffer():
+    """Unbind efi-framebuffer platform device if present."""
+    unbind = Path("/sys/bus/platform/drivers/efi-framebuffer/unbind")
+    if unbind.exists():
+        try:
+            unbind.write_text("efi-framebuffer.0")
+        except OSError:
+            pass
+
+
+def _unload_nvidia_modules():
+    """Unload proprietary NVIDIA modules. Returns True on success."""
+    _stop_nvidia_services()
+    _unbind_vtconsoles()
+    for mod in _NVIDIA_MODULES:
+        if not _is_module_loaded(mod):
+            continue
         r = run(["rmmod", mod], check=False)
-        if r.returncode != 0:
-            stderr = r.stderr.strip() if r.stderr else ""
-            if "not currently loaded" in stderr or "not found" in stderr:
-                continue
-            if "in use" in stderr:
-                print(f"  ! Cannot unload {mod}: {stderr}")
-                return False
+        if r.returncode == 0:
+            continue
+        stderr = (r.stderr or "").strip()
+        if "not currently loaded" in stderr or "not found" in stderr:
+            continue
+        print(f"  ! Cannot unload {mod}: {stderr}")
+        return False
+    return True
+
+
+def _unbind_pci_device(addr, driver):
+    """Unbind a single PCI device from its current driver via sysfs."""
+    unbind_path = _pci_device_dir(addr) / "driver" / "unbind"
+    try:
+        unbind_path.write_text(addr)
+    except OSError as e:
+        print(f"  ! Cannot unbind {addr} from {driver}: {e}")
+        return False
+    return True
+
+
+def _bind_pci_to_vfio(addr):
+    """Set driver_override to vfio-pci and trigger probe for a single device."""
+    device_dir = _pci_device_dir(addr)
+    try:
+        (device_dir / "driver_override").write_text("vfio-pci")
+    except OSError as e:
+        print(f"  ! Cannot set driver_override for {addr}: {e}")
+        return False
+    try:
+        Path("/sys/bus/pci/drivers_probe").write_text(addr)
+    except OSError as e:
+        print(f"  ! Cannot probe {addr}: {e}")
+        return False
     return True
 
 
 def bind_gpu_to_vfio(gpu_addr):
-    """Bind a PCI device to vfio-pci driver."""
-    device_dir = Path(f"/sys/bus/pci/devices/{gpu_addr}")
+    """Bind a PCI device to vfio-pci. Returns True on success.
 
-    if not device_dir.exists():
+    Safety: refuses to hot-unbind nouveau (kernel crash risk).
+    For nvidia proprietary driver, unloads modules first.
+    """
+    if not _pci_device_dir(gpu_addr).exists():
         print(f"  ! Device {gpu_addr} not found in sysfs")
         return False
 
     run(["modprobe", "vfio-pci"], check=False)
 
-    driver_link = device_dir / "driver"
-    if driver_link.exists():
-        current = os.path.basename(os.readlink(str(driver_link)))
-        if current == "vfio-pci":
+    driver = _read_pci_driver(gpu_addr)
+
+    if driver == "vfio-pci":
+        return True
+
+    if driver == "nouveau":
+        print(f"  ! {gpu_addr} is bound to nouveau — cannot hot-detach safely")
+        print(f"    Blacklist nouveau and reboot first")
+        return False
+
+    if driver == "nvidia":
+        if not _unload_nvidia_modules():
+            return False
+        driver = _read_pci_driver(gpu_addr)
+        if driver == "vfio-pci":
             return True
-        if current in ("nvidia", "nouveau"):
-            if not _unload_gpu_modules(current):
-                return False
-        unbind_path = device_dir / "driver" / "unbind"
-        try:
-            unbind_path.write_text(gpu_addr)
-        except OSError as e:
-            print(f"  ! Cannot unbind {gpu_addr} from {current}: {e}")
+
+    if driver is not None and driver != "vfio-pci":
+        if not _unbind_pci_device(gpu_addr, driver):
             return False
-        time.sleep(0.5)
+        time.sleep(0.3)
 
-    override = device_dir / "driver_override"
-    try:
-        override.write_text("vfio-pci")
-    except OSError as e:
-        print(f"  ! Cannot set driver_override for {gpu_addr}: {e}")
+    if not _bind_pci_to_vfio(gpu_addr):
         return False
+    time.sleep(0.3)
 
-    probe = Path("/sys/bus/pci/drivers_probe")
-    try:
-        probe.write_text(gpu_addr)
-    except OSError as e:
-        print(f"  ! Cannot probe {gpu_addr}: {e}")
-        return False
-
-    time.sleep(0.5)
-
-    if driver_link.exists():
-        bound = os.path.basename(os.readlink(str(driver_link)))
-        if bound != "vfio-pci":
-            print(f"  ! {gpu_addr} bound to '{bound}', expected 'vfio-pci'")
-            return False
-    else:
-        print(f"  ! {gpu_addr} has no driver after probe")
+    bound = _read_pci_driver(gpu_addr)
+    if bound != "vfio-pci":
+        print(f"  ! {gpu_addr} bound to '{bound}', expected 'vfio-pci'")
         return False
 
     return True
 
 
-def find_iommu_group_devices(gpu_addr):
-    """Find all PCI devices in the same IOMMU group as gpu_addr."""
-    group_path = Path(f"/sys/bus/pci/devices/{gpu_addr}/iommu_group/devices")
-    if not group_path.exists():
-        return [gpu_addr]
-    addrs = []
-    for entry in sorted(group_path.iterdir()):
-        name = entry.name
-        device_dir = Path(f"/sys/bus/pci/devices/{name}")
-        class_file = device_dir / "class"
-        if class_file.exists():
-            cls = class_file.read_text().strip()
-            # Skip PCI bridges (0x0604xx)
-            if cls.startswith("0x0604"):
-                continue
-        addrs.append(name)
-    return addrs
+def restore_gpu_to_host(gpu_addr):
+    """Unbind from vfio-pci, clear override, and let the kernel re-probe."""
+    device_dir = _pci_device_dir(gpu_addr)
+    for op, path, data in [
+        ("unbind", Path("/sys/bus/pci/drivers/vfio-pci/unbind"), gpu_addr),
+        ("clear override", device_dir / "driver_override", "\n"),
+        ("reprobe", Path("/sys/bus/pci/drivers_probe"), gpu_addr),
+    ]:
+        try:
+            path.write_text(data)
+        except OSError:
+            pass
 
 
 def run_gpu_test(gpus):
-    """Full GPU passthrough test: bind -> boot VM -> nvidia-smi -> teardown.
-
-    Binds all devices in the IOMMU group (GPU + audio). Exits on failure.
-    """
+    """Full GPU passthrough test: bind -> boot VM -> nvidia-smi -> teardown."""
     gpu = gpus[0]
     gpu_addr = gpu["addr"]
-
     group_devices = find_iommu_group_devices(gpu_addr)
+
     print(f"\n-> Binding IOMMU group devices to VFIO for test")
+    bound_so_far = []
     for addr in group_devices:
         print(f"  + Binding {addr}")
         if not bind_gpu_to_vfio(addr):
-            # Restore already-bound devices
-            for prev in group_devices:
-                if prev == addr:
-                    break
+            for prev in reversed(bound_so_far):
                 restore_gpu_to_host(prev)
             sys.exit(f"Failed to bind {addr} to VFIO")
+        bound_so_far.append(addr)
 
     ok = test_gpu_passthrough(gpu_addr)
 
@@ -1195,9 +1292,23 @@ def phase1(args):
         return
 
     iommu_ok = check_iommu_enabled()
+    needs_reboot = not iommu_ok
 
-    if not iommu_ok:
-        configure_iommu(gpus, audio)
+    # Even if IOMMU is already enabled, check whether GPU drivers require
+    # a reboot (nouveau cannot be safely hot-detached).
+    if not needs_reboot and gpus:
+        for gpu in gpus:
+            if _gpu_needs_reboot(gpu["addr"]):
+                print(f"\n-> GPU {gpu['addr']} is bound to nouveau — reboot required")
+                needs_reboot = True
+                break
+
+    if needs_reboot:
+        if not iommu_ok:
+            configure_iommu(gpus, audio)
+        else:
+            # IOMMU is on, but we still need to blacklist nouveau and rebuild initramfs
+            _configure_gpu_blacklist(gpus, audio)
 
         save_state(
             {
@@ -1231,10 +1342,11 @@ def phase1(args):
         run(["systemctl", "daemon-reload"])
         run(["systemctl", "enable", "qudata-install-continue.service"])
 
+        reason = "IOMMU configured" if not iommu_ok else "GPU driver blacklisted"
         print("\n" + "=" * 50)
         print("  REBOOT REQUIRED")
         print("=" * 50)
-        print("\n  IOMMU configured. Reboot to continue.\n")
+        print(f"\n  {reason}. Reboot to continue.\n")
 
         answer = input("  Reboot now? [y/N]: ").strip().lower()
         if answer in ("y", "yes"):
