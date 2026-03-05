@@ -616,9 +616,13 @@ def _ssh_cmd(port, key_path, remote_cmd):
 
 
 def _save_gpu_info(ssh_port, ssh_key):
-    """Query full GPU info from VM and save to JSON for agent use."""
+    """Query GPU info from the test VM and save to JSON for agent use.
+
+    The 'count' field is initially set to 1 (single GPU in test VM).
+    After all GPUs are tested, run_gpu_test calls _update_gpu_info_count
+    with the actual number of working GPUs.
+    """
     try:
-        # name, memory (MiB), driver, cuda version
         r = run(
             _ssh_cmd(ssh_port, ssh_key,
                      "nvidia-smi --query-gpu=name,memory.total,driver_version "
@@ -628,7 +632,6 @@ def _save_gpu_info(ssh_port, ssh_key):
         if r.returncode != 0 or not r.stdout.strip():
             return
 
-        # Parse: "Tesla T4, 15360, 535.261.03"
         parts = [p.strip() for p in r.stdout.strip().splitlines()[0].split(",")]
         if len(parts) < 3:
             return
@@ -636,7 +639,6 @@ def _save_gpu_info(ssh_port, ssh_key):
         vram_mib = float(parts[1])
         driver = parts[2]
 
-        # Get CUDA version from nvidia-smi header
         cuda_ver = 0.0
         r2 = run(
             _ssh_cmd(ssh_port, ssh_key, "nvidia-smi"),
@@ -650,19 +652,9 @@ def _save_gpu_info(ssh_port, ssh_key):
                         cuda_ver = float(m.group(1))
                     break
 
-        # Count GPUs
-        r3 = run(
-            _ssh_cmd(ssh_port, ssh_key,
-                     "nvidia-smi --query-gpu=name --format=csv,noheader | wc -l"),
-            check=False,
-        )
-        count = 1
-        if r3.returncode == 0 and r3.stdout.strip().isdigit():
-            count = int(r3.stdout.strip())
-
         info = {
             "name": name,
-            "count": count,
+            "count": 1,
             "vram_gb": round(vram_mib / 1024, 1),
             "max_cuda": cuda_ver,
             "driver_version": driver,
@@ -676,7 +668,19 @@ def _save_gpu_info(ssh_port, ssh_key):
         print(f"  ! Warning: could not save GPU info: {e}")
 
 
-def test_gpu_passthrough(gpu_addr):
+def _update_gpu_info_count(count):
+    """Update the 'count' field in gpu-info.json after all GPUs are tested."""
+    if not GPU_INFO_PATH.exists():
+        return
+    try:
+        info = json.loads(GPU_INFO_PATH.read_text())
+        info["count"] = count
+        GPU_INFO_PATH.write_text(json.dumps(info, indent=2))
+    except (json.JSONDecodeError, OSError):
+        pass
+
+
+def test_gpu_passthrough(gpu_addr, save_info=True):
     """Boot a test VM with GPU passthrough, verify nvidia-smi, tear down."""
     print("\n-> Testing GPU passthrough")
     print(f"  + GPU: {gpu_addr}")
@@ -816,7 +820,8 @@ def test_gpu_passthrough(gpu_addr):
             if r.returncode == 0 and r.stdout.strip():
                 print(f"  + GPU in VM: {r.stdout.strip().splitlines()[0]}")
                 success = True
-                _save_gpu_info(ssh_port, ssh_key)
+                if save_info:
+                    _save_gpu_info(ssh_port, ssh_key)
             else:
                 print("  ! nvidia-smi failed inside VM")
                 if r.stdout:
@@ -1050,39 +1055,56 @@ def restore_gpu_to_host(gpu_addr):
             pass
 
 
-def run_gpu_test(gpus):
-    """Full GPU passthrough test: bind -> boot VM -> nvidia-smi -> teardown."""
-    gpu = gpus[0]
-    gpu_addr = gpu["addr"]
+def _bind_iommu_group(gpu_addr):
+    """Bind all non-bridge devices in the GPU's IOMMU group to vfio-pci.
+    Returns list of bound addresses, or exits on failure.
+    """
     group_devices = find_iommu_group_devices(gpu_addr)
-
-    print(f"\n-> Binding IOMMU group devices to VFIO for test")
-    bound_so_far = []
+    bound = []
     for addr in group_devices:
         print(f"  + Binding {addr}")
         if not bind_gpu_to_vfio(addr):
-            for prev in reversed(bound_so_far):
+            for prev in reversed(bound):
                 restore_gpu_to_host(prev)
             sys.exit(f"Failed to bind {addr} to VFIO")
-        bound_so_far.append(addr)
+        bound.append(addr)
+    return bound
 
-    ok = test_gpu_passthrough(gpu_addr)
 
-    print("  + Restoring IOMMU group devices to host")
-    for addr in reversed(group_devices):
+def _restore_iommu_group(addrs):
+    """Restore all addresses to host drivers."""
+    for addr in reversed(addrs):
         restore_gpu_to_host(addr)
 
-    if ok:
-        print("\n" + "=" * 50)
-        print("  GPU PASSTHROUGH TEST PASSED")
-        print("=" * 50)
-        print(f"\n  {gpu['name']} ({gpu_addr}) works inside VM.")
-        print("  Proceeding with agent setup.\n")
-    else:
+
+def run_gpu_test(gpus):
+    """Test GPU passthrough for every detected GPU, one by one."""
+    passed = []
+    failed = []
+
+    for i, gpu in enumerate(gpus):
+        gpu_addr = gpu["addr"]
+        gpu_name = gpu["name"]
+        print(f"\n-> Testing GPU {i + 1}/{len(gpus)}: {gpu_name} ({gpu_addr})")
+
+        bound_addrs = _bind_iommu_group(gpu_addr)
+
+        need_gpu_info = (len(passed) == 0)
+        ok = test_gpu_passthrough(gpu_addr, save_info=need_gpu_info)
+
+        print(f"  + Restoring IOMMU group devices to host")
+        _restore_iommu_group(bound_addrs)
+
+        if ok:
+            passed.append(gpu)
+        else:
+            failed.append(gpu)
+
+    if not passed:
         print("\n" + "=" * 50)
         print("  GPU PASSTHROUGH TEST FAILED")
         print("=" * 50)
-        print(f"\n  {gpu['name']} ({gpu_addr}) did not respond inside VM.")
+        print(f"\n  None of {len(gpus)} GPU(s) responded inside VM.")
         print(f"  Log: {RUN_DIR / 'gpu-test.log'}")
         print()
         print("  Common causes:")
@@ -1091,6 +1113,20 @@ def run_gpu_test(gpus):
         print("    - All IOMMU group devices must be bound to vfio-pci")
         print("    - Base image missing NVIDIA drivers\n")
         sys.exit(1)
+
+    # Update gpu-info.json with the correct total count
+    _update_gpu_info_count(len(passed))
+
+    print("\n" + "=" * 50)
+    print("  GPU PASSTHROUGH TEST PASSED")
+    print("=" * 50)
+    for gpu in passed:
+        print(f"  + {gpu['name']} ({gpu['addr']})")
+    if failed:
+        print(f"\n  WARNING: {len(failed)} GPU(s) failed:")
+        for gpu in failed:
+            print(f"  - {gpu['name']} ({gpu['addr']})")
+    print(f"\n  {len(passed)}/{len(gpus)} GPU(s) working. Proceeding with agent setup.\n")
 
 
 # ---------------------------------------------------------------------------
