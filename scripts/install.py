@@ -1184,7 +1184,11 @@ def build_agent(binary_path=None):
     if not shutil.which("go"):
         print("  + Installing Go")
         tarball = f"go{GO_VERSION}.linux-amd64.tar.gz"
-        run(["wget", "-q", f"https://go.dev/dl/{tarball}"])
+        dl_url = f"https://go.dev/dl/{tarball}"
+        Path(tarball).unlink(missing_ok=True)
+        run(["wget", "--tries=3", "--timeout=60", "-q", dl_url])
+        if not Path(tarball).exists() or Path(tarball).stat().st_size < 50_000_000:
+            sys.exit(f"Download failed or file too small: {tarball}")
         run(["rm", "-rf", "/usr/local/go"])
         run(["tar", "-C", "/usr/local", "-xzf", tarball])
         Path(tarball).unlink(missing_ok=True)
