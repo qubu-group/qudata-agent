@@ -615,13 +615,8 @@ def _ssh_cmd(port, key_path, remote_cmd):
     ]
 
 
-def _save_gpu_info(ssh_port, ssh_key):
-    """Query GPU info from the test VM and save to JSON for agent use.
-
-    The 'count' field is initially set to 1 (single GPU in test VM).
-    After all GPUs are tested, run_gpu_test calls _update_gpu_info_count
-    with the actual number of working GPUs.
-    """
+def _save_gpu_info(ssh_port, ssh_key, gpu_count):
+    """Query GPU info from the test VM and save to JSON for agent use."""
     try:
         r = run(
             _ssh_cmd(ssh_port, ssh_key,
@@ -654,7 +649,7 @@ def _save_gpu_info(ssh_port, ssh_key):
 
         info = {
             "name": name,
-            "count": 1,
+            "count": gpu_count,
             "vram_gb": round(vram_mib / 1024, 1),
             "max_cuda": cuda_ver,
             "driver_version": driver,
@@ -662,28 +657,18 @@ def _save_gpu_info(ssh_port, ssh_key):
 
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         GPU_INFO_PATH.write_text(json.dumps(info, indent=2))
-        print(f"  + GPU info saved: {info['name']}, {info['vram_gb']} GB, CUDA {cuda_ver}")
+        print(f"  + GPU info saved: {info['name']}, {info['vram_gb']} GB, "
+              f"CUDA {cuda_ver}, count {gpu_count}")
 
     except Exception as e:
         print(f"  ! Warning: could not save GPU info: {e}")
 
 
-def _update_gpu_info_count(count):
-    """Update the 'count' field in gpu-info.json after all GPUs are tested."""
-    if not GPU_INFO_PATH.exists():
-        return
-    try:
-        info = json.loads(GPU_INFO_PATH.read_text())
-        info["count"] = count
-        GPU_INFO_PATH.write_text(json.dumps(info, indent=2))
-    except (json.JSONDecodeError, OSError):
-        pass
-
-
-def test_gpu_passthrough(gpu_addr, save_info=True):
-    """Boot a test VM with GPU passthrough, verify nvidia-smi, tear down."""
+def test_gpu_passthrough(gpu_addrs):
+    """Boot a test VM with ALL GPUs, return number of working GPUs (0 on failure)."""
     print("\n-> Testing GPU passthrough")
-    print(f"  + GPU: {gpu_addr}")
+    for addr in gpu_addrs:
+        print(f"  + GPU: {addr}")
 
     ssh_key = SSH_DIR / "management_key"
     ssh_port = 2299
@@ -694,35 +679,32 @@ def test_gpu_passthrough(gpu_addr, save_info=True):
 
     if not ssh_key.exists():
         print(f"  ! SSH key missing: {ssh_key}")
-        return False
+        return 0
 
-    # Check VFIO driver
-    driver_link = Path(f"/sys/bus/pci/devices/{gpu_addr}/driver")
-    if not driver_link.exists():
-        print(f"  ! No driver bound to {gpu_addr}")
-        return False
-    drv = os.path.basename(os.readlink(str(driver_link)))
-    if drv != "vfio-pci":
-        print(f"  ! Driver is '{drv}', expected 'vfio-pci'")
-        return False
-    print(f"  + Driver: vfio-pci")
+    for addr in gpu_addrs:
+        driver_link = Path(f"/sys/bus/pci/devices/{addr}/driver")
+        if not driver_link.exists():
+            print(f"  ! No driver bound to {addr}")
+            return 0
+        drv = os.path.basename(os.readlink(str(driver_link)))
+        if drv != "vfio-pci":
+            print(f"  ! {addr} driver is '{drv}', expected 'vfio-pci'")
+            return 0
 
-    # Check VFIO group device
-    iommu_link = Path(f"/sys/bus/pci/devices/{gpu_addr}/iommu_group")
-    if iommu_link.exists():
-        group = os.path.basename(os.readlink(str(iommu_link)))
-        vfio_dev = Path(f"/dev/vfio/{group}")
-        if not vfio_dev.exists():
-            print(f"  ! /dev/vfio/{group} missing")
-            return False
-        print(f"  + VFIO: /dev/vfio/{group}")
+        iommu_link = Path(f"/sys/bus/pci/devices/{addr}/iommu_group")
+        if iommu_link.exists():
+            group = os.path.basename(os.readlink(str(iommu_link)))
+            vfio_dev = Path(f"/dev/vfio/{group}")
+            if not vfio_dev.exists():
+                print(f"  ! /dev/vfio/{group} missing for {addr}")
+                return 0
+            print(f"  + {addr}: vfio-pci, /dev/vfio/{group}")
 
-    # Find OVMF (required for GPU ROM initialization)
     ovmf_code, ovmf_vars_tmpl = _find_ovmf()
     if not ovmf_code:
         print("  ! OVMF firmware not found")
         print("    GPU passthrough requires UEFI: apt-get install ovmf")
-        return False
+        return 0
     print(f"  + OVMF: {ovmf_code}")
 
     # ---- Prepare artifacts ----
@@ -732,18 +714,15 @@ def test_gpu_passthrough(gpu_addr, save_info=True):
     cleanup_files = [overlay, ovmf_vars]
 
     try:
-        # Overlay disk
         run([
             "qemu-img", "create", "-f", "qcow2",
             "-b", str(BASE_IMAGE_PATH), "-F", "qcow2", str(overlay),
         ])
-
-        # OVMF vars copy (UEFI needs writable variable store)
         shutil.copy2(ovmf_vars_tmpl, ovmf_vars)
 
-        # ---- QEMU command ----
+        # ---- QEMU command (matches buildVMArgs in manager.go) ----
 
-        vfio_dev = f"vfio-pci,host={gpu_addr},bus=pci.1,rombar=0"
+        mem = max(4096, 2048 * len(gpu_addrs) + 2048)
 
         qemu_cmd = [
             "qemu-system-x86_64",
@@ -751,20 +730,28 @@ def test_gpu_passthrough(gpu_addr, save_info=True):
             "-global", "q35-pcihost.pci-hole64-size=64G",
             "-cpu", "host",
             "-smp", "2",
-            "-m", "4096",
+            "-m", str(mem),
             "-drive", f"if=pflash,format=raw,readonly=on,file={ovmf_code}",
             "-drive", f"if=pflash,format=raw,file={ovmf_vars}",
             "-drive", f"file={overlay},format=qcow2,if=virtio",
-            "-device", "pcie-root-port,id=pci.1,bus=pcie.0",
-            "-device", vfio_dev,
+        ]
+
+        for i, addr in enumerate(gpu_addrs):
+            port_id = f"pci.{i + 1}"
+            qemu_cmd.extend([
+                "-device", f"pcie-root-port,id={port_id},bus=pcie.0",
+                "-device", f"vfio-pci,host={addr},bus={port_id},rombar=0",
+            ])
+
+        qemu_cmd.extend([
             "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22",
             "-device", "virtio-net-pci,netdev=net0",
             "-nographic",
-        ]
+        ])
 
         # ---- Launch VM ----
 
-        print(f"  + Starting test VM")
+        print(f"  + Starting test VM ({len(gpu_addrs)} GPU(s), {mem}M RAM)")
         print(f"  + Log: {qemu_log}")
 
         with open(qemu_log, "w") as log_fh:
@@ -773,13 +760,12 @@ def test_gpu_passthrough(gpu_addr, save_info=True):
 
             proc = subprocess.Popen(qemu_cmd, stdout=log_fh, stderr=log_fh)
 
-            # Give QEMU a moment to start or fail
             time.sleep(3)
             if proc.poll() is not None:
                 print(f"  ! QEMU exited immediately (code {proc.returncode})")
                 log_fh.flush()
                 _show_log_tail(qemu_log)
-                return False
+                return 0
 
             print(f"  + QEMU running (pid {proc.pid}), waiting for SSH...")
 
@@ -793,7 +779,7 @@ def test_gpu_passthrough(gpu_addr, save_info=True):
                     print(f"  ! VM exited (code {proc.returncode})")
                     log_fh.flush()
                     _show_log_tail(qemu_log)
-                    return False
+                    return 0
                 r = run(_ssh_cmd(ssh_port, ssh_key, "true"), check=False)
                 if r.returncode == 0:
                     ssh_ready = True
@@ -808,30 +794,44 @@ def test_gpu_passthrough(gpu_addr, save_info=True):
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
-                return False
+                return 0
 
             # ---- Test nvidia-smi ----
 
             print("  + SSH ready, checking nvidia-smi")
             r = run(
                 _ssh_cmd(ssh_port, ssh_key,
-                         "nvidia-smi --query-gpu=name,memory.total,driver_version "
-                         "--format=csv,noheader,nounits"),
+                         "nvidia-smi --query-gpu=name --format=csv,noheader"),
                 check=False,
             )
 
-            success = False
+            gpu_count = 0
             if r.returncode == 0 and r.stdout.strip():
-                print(f"  + GPU in VM: {r.stdout.strip().splitlines()[0]}")
-                success = True
-                if save_info:
-                    _save_gpu_info(ssh_port, ssh_key)
+                lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
+                gpu_count = len(lines)
+                for line in lines:
+                    print(f"  + GPU in VM: {line}")
+                _save_gpu_info(ssh_port, ssh_key, gpu_count)
             else:
                 print("  ! nvidia-smi failed inside VM")
                 if r.stdout:
                     print(f"    stdout: {r.stdout.strip()[:300]}")
                 if r.stderr:
                     print(f"    stderr: {r.stderr.strip()[:300]}")
+                # Collect diagnostics
+                r_lspci = run(
+                    _ssh_cmd(ssh_port, ssh_key,
+                             "lspci -nn 2>/dev/null | grep -i nvidia"),
+                    check=False)
+                r_dmesg = run(
+                    _ssh_cmd(ssh_port, ssh_key,
+                             "dmesg 2>/dev/null | grep -iE "
+                             "'nvidia|nvrm|vfio|gpu' | tail -20"),
+                    check=False)
+                if r_lspci.stdout and r_lspci.stdout.strip():
+                    print(f"    lspci:\n{_indent(r_lspci.stdout.strip(), 6)}")
+                if r_dmesg.stdout and r_dmesg.stdout.strip():
+                    print(f"    dmesg:\n{_indent(r_dmesg.stdout.strip(), 6)}")
 
             # ---- Shutdown ----
 
@@ -847,15 +847,20 @@ def test_gpu_passthrough(gpu_addr, save_info=True):
                     proc.kill()
                     proc.wait()
 
-        return success
+        return gpu_count
 
     except Exception as e:
         print(f"  ! Test error: {e}")
-        return False
+        return 0
 
     finally:
         for f in cleanup_files:
             Path(f).unlink(missing_ok=True)
+
+
+def _indent(text, spaces):
+    prefix = " " * spaces
+    return "\n".join(prefix + line for line in text.splitlines())
 
 
 # ---------------------------------------------------------------------------
@@ -1060,52 +1065,33 @@ def restore_gpu_to_host(gpu_addr):
 
 
 
-def _bind_iommu_group(gpu_addr):
-    """Bind all non-bridge devices in the GPU's IOMMU group to vfio-pci.
-    Returns list of bound addresses, or exits on failure.
-    """
-    group_devices = find_iommu_group_devices(gpu_addr)
-    bound = []
-    for addr in group_devices:
-        print(f"  + Binding {addr}")
-        if not bind_gpu_to_vfio(addr):
-            for prev in reversed(bound):
-                restore_gpu_to_host(prev)
-            sys.exit(f"Failed to bind {addr} to VFIO")
-        bound.append(addr)
-    return bound
-
-
-def _restore_iommu_group(addrs):
-    """Restore all addresses to host drivers."""
-    for addr in reversed(addrs):
-        restore_gpu_to_host(addr)
-
-
 def run_gpu_test(gpus):
-    """Test GPU passthrough for every detected GPU, one by one."""
-    passed = []
-    failed = []
+    """Bind ALL GPUs to VFIO once and test them together in a single VM.
 
-    for i, gpu in enumerate(gpus):
+    GPUs remain bound to vfio-pci after the test — ready for the agent.
+    Returns the number of working GPUs.
+    """
+    # 1. Unload nvidia modules once (before binding any GPU)
+    print("\n-> Preparing GPUs for passthrough test")
+    _unload_nvidia_modules()
+
+    # 2. Bind ALL IOMMU groups to vfio-pci (no restore afterward)
+    for gpu in gpus:
         gpu_addr = gpu["addr"]
-        gpu_name = gpu["name"]
-        print(f"\n-> Testing GPU {i + 1}/{len(gpus)}: {gpu_name} ({gpu_addr})")
+        group_devices = find_iommu_group_devices(gpu_addr)
+        for addr in group_devices:
+            if _read_pci_driver(addr) == "vfio-pci":
+                continue
+            print(f"  + Binding {addr} to vfio-pci")
+            if not bind_gpu_to_vfio(addr):
+                sys.exit(f"Failed to bind {addr} to VFIO")
 
-        bound_addrs = _bind_iommu_group(gpu_addr)
+    # 3. Test ALL GPUs in one VM
+    gpu_addrs = [gpu["addr"] for gpu in gpus]
+    gpu_count = test_gpu_passthrough(gpu_addrs)
 
-        need_gpu_info = (len(passed) == 0)
-        ok = test_gpu_passthrough(gpu_addr, save_info=need_gpu_info)
-
-        print(f"  + Restoring IOMMU group devices to host")
-        _restore_iommu_group(bound_addrs)
-
-        if ok:
-            passed.append(gpu)
-        else:
-            failed.append(gpu)
-
-    if not passed:
+    # 4. Report results
+    if gpu_count == 0:
         print("\n" + "=" * 50)
         print("  GPU PASSTHROUGH TEST FAILED")
         print("=" * 50)
@@ -1119,19 +1105,15 @@ def run_gpu_test(gpus):
         print("    - Base image missing NVIDIA drivers\n")
         sys.exit(1)
 
-    # Update gpu-info.json with the correct total count
-    _update_gpu_info_count(len(passed))
-
     print("\n" + "=" * 50)
     print("  GPU PASSTHROUGH TEST PASSED")
     print("=" * 50)
-    for gpu in passed:
-        print(f"  + {gpu['name']} ({gpu['addr']})")
-    if failed:
-        print(f"\n  WARNING: {len(failed)} GPU(s) failed:")
-        for gpu in failed:
-            print(f"  - {gpu['name']} ({gpu['addr']})")
-    print(f"\n  {len(passed)}/{len(gpus)} GPU(s) working. Proceeding with agent setup.\n")
+    print(f"\n  {gpu_count}/{len(gpus)} GPU(s) working inside VM.")
+    if gpu_count < len(gpus):
+        print(f"  WARNING: {len(gpus) - gpu_count} GPU(s) not detected by nvidia-smi")
+    print()
+
+    return gpu_count
 
 
 # ---------------------------------------------------------------------------
@@ -1416,9 +1398,12 @@ def phase2_continue(api_key, gpus, service_url, test_mode=False):
     prepare_base_image()
 
     if gpus:
-        run_gpu_test(gpus)
+        working_count = run_gpu_test(gpus)
+        service_gpus = gpus[:working_count] if working_count < len(gpus) else gpus
+    else:
+        service_gpus = gpus
 
-    create_service(api_key, gpus, False, service_url, test_mode)
+    create_service(api_key, service_gpus, False, service_url, test_mode)
     start_service()
 
     STATE_FILE.unlink(missing_ok=True)
