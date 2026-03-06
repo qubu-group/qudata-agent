@@ -638,10 +638,7 @@ func (m *Manager) buildVMArgs(diskPath string, gpuAddrs []string, qmpSocket stri
 		args = append(args,
 			"-device", fmt.Sprintf("pcie-root-port,id=%s,bus=pcie.0", portID),
 		)
-		vfioDev := fmt.Sprintf("vfio-pci,host=%s,bus=%s", addr, portID)
-		if romPath := m.gpuROMPath(addr); romPath != "" {
-			vfioDev += ",romfile=" + romPath
-		}
+		vfioDev := fmt.Sprintf("vfio-pci,host=%s,bus=%s,rombar=0", addr, portID)
 		args = append(args, "-device", vfioDev)
 	}
 	args = append(args,
@@ -650,18 +647,6 @@ func (m *Manager) buildVMArgs(diskPath string, gpuAddrs []string, qmpSocket stri
 	)
 	args = append(args, net.Args()...)
 	return args
-}
-
-// gpuROMPath returns the path to a pre-dumped GPU ROM file, or empty string.
-func (m *Manager) gpuROMPath(addr string) string {
-	if m.dataDir == "" {
-		return ""
-	}
-	romFile := filepath.Join(m.dataDir, "gpu-rom-"+strings.ReplaceAll(addr, ":", "-")+".bin")
-	if info, err := os.Stat(romFile); err == nil && info.Size() > 0 {
-		return romFile
-	}
-	return ""
 }
 
 func (m *Manager) copyOVMFVars(vmID string) (string, error) {
