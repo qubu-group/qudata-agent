@@ -25,6 +25,7 @@ type Config struct {
 	BaseImagePath string
 	ImageDir      string
 	RunDir        string
+	DataDir       string
 	DefaultGPUs   []string
 	SSHKeyPath    string
 	DefaultCPUs   string
@@ -41,6 +42,7 @@ type Manager struct {
 	baseImage    string
 	defaultGPUs  []string
 	runDir       string
+	dataDir      string
 	sshKeyPath   string
 	defaultCPU   string
 	defaultMem   string
@@ -86,6 +88,7 @@ func NewManager(cfg Config, logger *slog.Logger) *Manager {
 		baseImage:    cfg.BaseImagePath,
 		defaultGPUs:  cfg.DefaultGPUs,
 		runDir:       cfg.RunDir,
+		dataDir:      cfg.DataDir,
 		sshKeyPath:   cfg.SSHKeyPath,
 		defaultCPU:   cpus,
 		defaultMem:   mem,
@@ -616,6 +619,7 @@ func (m *Manager) prepareDisk(vmID string, sizeGB int) (string, error) {
 func (m *Manager) buildVMArgs(diskPath string, gpuAddrs []string, qmpSocket string, net *NetworkConfig, cpus, mem, ovmfVarsPath string) []string {
 	args := []string{
 		"-machine", "q35,accel=kvm",
+		"-global", "q35-pcihost.pci-hole64-size=64G",
 		"-cpu", "host",
 		"-smp", cpus,
 		"-m", strings.ToUpper(strings.TrimSpace(mem)),
@@ -629,8 +633,16 @@ func (m *Manager) buildVMArgs(diskPath string, gpuAddrs []string, qmpSocket stri
 	args = append(args,
 		"-drive", fmt.Sprintf("file=%s,format=qcow2,if=virtio", diskPath),
 	)
-	for _, addr := range gpuAddrs {
-		args = append(args, "-device", fmt.Sprintf("vfio-pci,host=%s", addr))
+	for i, addr := range gpuAddrs {
+		portID := fmt.Sprintf("pci.%d", i+1)
+		args = append(args,
+			"-device", fmt.Sprintf("pcie-root-port,id=%s,bus=pcie.0", portID),
+		)
+		vfioDev := fmt.Sprintf("vfio-pci,host=%s,bus=%s", addr, portID)
+		if romPath := m.gpuROMPath(addr); romPath != "" {
+			vfioDev += ",romfile=" + romPath
+		}
+		args = append(args, "-device", vfioDev)
 	}
 	args = append(args,
 		"-qmp", fmt.Sprintf("unix:%s,server,nowait", qmpSocket),
@@ -638,6 +650,18 @@ func (m *Manager) buildVMArgs(diskPath string, gpuAddrs []string, qmpSocket stri
 	)
 	args = append(args, net.Args()...)
 	return args
+}
+
+// gpuROMPath returns the path to a pre-dumped GPU ROM file, or empty string.
+func (m *Manager) gpuROMPath(addr string) string {
+	if m.dataDir == "" {
+		return ""
+	}
+	romFile := filepath.Join(m.dataDir, "gpu-rom-"+strings.ReplaceAll(addr, ":", "-")+".bin")
+	if info, err := os.Stat(romFile); err == nil && info.Size() > 0 {
+		return romFile
+	}
+	return ""
 }
 
 func (m *Manager) copyOVMFVars(vmID string) (string, error) {

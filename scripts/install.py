@@ -680,7 +680,7 @@ def _update_gpu_info_count(count):
         pass
 
 
-def test_gpu_passthrough(gpu_addr, save_info=True):
+def test_gpu_passthrough(gpu_addr, save_info=True, romfile=None):
     """Boot a test VM with GPU passthrough, verify nvidia-smi, tear down."""
     print("\n-> Testing GPU passthrough")
     print(f"  + GPU: {gpu_addr}")
@@ -743,16 +743,23 @@ def test_gpu_passthrough(gpu_addr, save_info=True):
 
         # ---- QEMU command ----
 
+        vfio_dev = f"vfio-pci,host={gpu_addr},bus=pci.1"
+        if romfile:
+            vfio_dev += f",romfile={romfile}"
+            print(f"  + ROM: {romfile}")
+
         qemu_cmd = [
             "qemu-system-x86_64",
             "-machine", "q35,accel=kvm",
+            "-global", "q35-pcihost.pci-hole64-size=64G",
             "-cpu", "host",
             "-smp", "2",
             "-m", "4096",
             "-drive", f"if=pflash,format=raw,readonly=on,file={ovmf_code}",
             "-drive", f"if=pflash,format=raw,file={ovmf_vars}",
             "-drive", f"file={overlay},format=qcow2,if=virtio",
-            "-device", f"vfio-pci,host={gpu_addr}",
+            "-device", "pcie-root-port,id=pci.1,bus=pcie.0",
+            "-device", vfio_dev,
             "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22",
             "-device", "virtio-net-pci,netdev=net0",
             "-nographic",
@@ -1055,6 +1062,41 @@ def restore_gpu_to_host(gpu_addr):
             pass
 
 
+def _dump_gpu_rom(gpu_addr):
+    """Dump GPU ROM from sysfs before binding to vfio-pci.
+
+    Secondary GPUs often lack a BIOS-shadowed ROM.  Without it OVMF cannot
+    initialise the GPU inside the guest and nvidia-smi reports "No devices".
+    We dump the ROM while the device still has a working driver (or right
+    after module unload, when the ROM BAR is still mapped).
+    """
+    rom_path = _pci_device_dir(gpu_addr) / "rom"
+    out_path = DATA_DIR / f"gpu-rom-{gpu_addr.replace(':', '-')}.bin"
+
+    if out_path.exists() and out_path.stat().st_size > 0:
+        return str(out_path)
+
+    if not rom_path.exists():
+        return None
+
+    try:
+        rom_path.write_text("1")
+        data = rom_path.read_bytes()
+        rom_path.write_text("0")
+        if len(data) < 512:
+            return None
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(data)
+        print(f"  + GPU ROM dumped: {out_path} ({len(data)} bytes)")
+        return str(out_path)
+    except OSError:
+        try:
+            rom_path.write_text("0")
+        except OSError:
+            pass
+        return None
+
+
 def _bind_iommu_group(gpu_addr):
     """Bind all non-bridge devices in the GPU's IOMMU group to vfio-pci.
     Returns list of bound addresses, or exits on failure.
@@ -1087,10 +1129,12 @@ def run_gpu_test(gpus):
         gpu_name = gpu["name"]
         print(f"\n-> Testing GPU {i + 1}/{len(gpus)}: {gpu_name} ({gpu_addr})")
 
+        romfile = _dump_gpu_rom(gpu_addr)
+
         bound_addrs = _bind_iommu_group(gpu_addr)
 
         need_gpu_info = (len(passed) == 0)
-        ok = test_gpu_passthrough(gpu_addr, save_info=need_gpu_info)
+        ok = test_gpu_passthrough(gpu_addr, save_info=need_gpu_info, romfile=romfile)
 
         print(f"  + Restoring IOMMU group devices to host")
         _restore_iommu_group(bound_addrs)

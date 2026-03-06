@@ -58,6 +58,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Agent, error) {
 		BaseImagePath: cfg.BaseImagePath,
 		ImageDir:      cfg.ImageDir,
 		RunDir:        cfg.VMRunDir,
+		DataDir:       cfg.DataDir,
 		DefaultGPUs:   cfg.GPUPCIAddrs,
 		SSHKeyPath:    sshKeyPath,
 		DefaultCPUs:   cfg.VMDefaultCPUs,
